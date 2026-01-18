@@ -4,6 +4,7 @@ import type {
   ExtensionSettings,
   SummarizationResult,
   InProgressStatus,
+  CachedSummary,
 } from '../shared/types';
 import { CATEGORY_TO_PROMPT } from '../shared/constants';
 import './popup.css';
@@ -173,6 +174,23 @@ async function initialize(): Promise<void> {
     if (inProgressStatus.promptId) {
       elements.promptSelect.value = inProgressStatus.promptId;
     }
+    return;
+  }
+
+  // Check for cached summary and display it automatically
+  const cachedSummary = await sendMessage<CachedSummary | null>('GET_CACHED_SUMMARY', {
+    videoId: currentVideoInfo.videoId,
+    platform: currentVideoInfo.platform,
+  });
+
+  if (cachedSummary) {
+    // Select the prompt that was used for this cached summary
+    elements.promptSelect.value = cachedSummary.promptId;
+
+    // Display the cached summary
+    renderSummary(cachedSummary.summary);
+    showSection(elements.summarySection);
+    elements.cachedBadge.classList.remove('hidden');
   }
 }
 
