@@ -261,6 +261,15 @@ chrome.runtime.onMessage.addListener((message) => {
       setLoading(false);
     }
   }
+
+  // Handle errors that occur during streaming
+  if (message.type === 'SUMMARIZE_RESPONSE') {
+    const result = message.payload as SummarizationResult;
+    if (!result.success && result.error) {
+      showError(result.error);
+      setLoading(false);
+    }
+  }
 });
 
 elements.settingsBtn.addEventListener('click', openOptions);

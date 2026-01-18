@@ -250,17 +250,31 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
             chrome.runtime.sendMessage({
               type: 'SUMMARIZE_STREAM',
               payload: { chunk, done },
-            }).catch(() => {});
+            }).catch((err) => {
+              console.debug('[Media Summarizer] Stream chunk send failed (popup may be closed):', err);
+            });
           }).then((result) => {
             markVideoComplete(videoId, platform);
             if (!result.success) {
+              console.error('[Media Summarizer] Streaming summarization failed:', result.error);
               chrome.runtime.sendMessage({
                 type: 'SUMMARIZE_RESPONSE',
                 payload: result,
-              }).catch(() => {});
+              }).catch((err) => {
+                console.debug('[Media Summarizer] Error response send failed (popup may be closed):', err);
+              });
             }
-          }).catch(() => {
+          }).catch((error) => {
             markVideoComplete(videoId, platform);
+            console.error('[Media Summarizer] Streaming summarization error:', error);
+            // Try to notify the popup about the error
+            chrome.runtime.sendMessage({
+              type: 'SUMMARIZE_RESPONSE',
+              payload: {
+                success: false,
+                error: error instanceof Error ? error.message : String(error),
+              },
+            }).catch(() => {});
           });
           return { type: 'SUMMARIZE_RESPONSE', payload: { success: true, summary: '', inProgress: true } };
         }

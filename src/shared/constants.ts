@@ -9,7 +9,7 @@ export const GEMINI_MODELS = [
   { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)' },
 ] as const;
 
-export const DEFAULT_MODEL = 'gemini-2.5-flash';
+export const DEFAULT_MODEL = 'gemini-3-flash-preview';
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   geminiApiKey: '',
