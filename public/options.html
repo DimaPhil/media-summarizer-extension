@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Summarizer - Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>Media Summarizer Settings</h1>
+    </header>
+
+    <main class="main">
+      <section class="section">
+        <h2>API Configuration</h2>
+        <div class="form-group">
+          <label for="gemini-api-key">Gemini API Key <span class="required">*</span></label>
+          <div class="input-row">
+            <input type="password" id="gemini-api-key" placeholder="Enter your Gemini API key">
+            <button type="button" id="toggle-gemini-key" class="btn btn-icon" title="Show/Hide">
+              <svg class="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+            <button type="button" id="test-gemini-key" class="btn btn-secondary">Test</button>
+          </div>
+          <p class="hint">Get your API key from <a href="https://aistudio.google.com/apikey" target="_blank">Google AI Studio</a></p>
+          <div id="gemini-test-result" class="test-result hidden"></div>
+        </div>
+
+        <div class="form-group">
+          <label for="youtube-api-key">YouTube API Key <span class="optional">(optional)</span></label>
+          <div class="input-row">
+            <input type="password" id="youtube-api-key" placeholder="Enter your YouTube API key">
+            <button type="button" id="toggle-youtube-key" class="btn btn-icon" title="Show/Hide">
+              <svg class="eye-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </div>
+          <p class="hint">Required for automatic video category detection. Get from <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a></p>
+        </div>
+      </section>
+
+      <section class="section">
+        <h2>Preferences</h2>
+        <div class="form-group">
+          <label for="default-prompt">Default Prompt Template</label>
+          <select id="default-prompt">
+            <option value="">Loading...</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="auto-detect-category">
+            <span>Auto-detect prompt from video category</span>
+          </label>
+          <p class="hint">Requires YouTube API key</p>
+        </div>
+
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="stream-response">
+            <span>Stream response (show summary as it generates)</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-header">
+          <h2>Prompt Templates</h2>
+          <button type="button" id="add-prompt" class="btn btn-primary btn-sm">+ Add Prompt</button>
+        </div>
+        <div id="prompts-list" class="prompts-list">
+          <!-- Prompts will be rendered here -->
+        </div>
+      </section>
+
+      <div class="actions">
+        <button type="button" id="reset-defaults" class="btn btn-secondary">Reset to Defaults</button>
+        <button type="button" id="save-settings" class="btn btn-primary">Save Settings</button>
+      </div>
+    </main>
+
+    <div id="prompt-modal" class="modal hidden">
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 id="modal-title">Add Prompt Template</h3>
+          <button type="button" id="close-modal" class="btn btn-icon">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
+        <div class="modal-body">
+          <div class="form-group">
+            <label for="prompt-name">Name</label>
+            <input type="text" id="prompt-name" placeholder="e.g., Technical Review">
+          </div>
+          <div class="form-group">
+            <label for="prompt-text">Prompt</label>
+            <textarea id="prompt-text" rows="10" placeholder="Enter your prompt template..."></textarea>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="cancel-prompt" class="btn btn-secondary">Cancel</button>
+          <button type="button" id="save-prompt" class="btn btn-primary">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden">
+      <span id="toast-message"></span>
+    </div>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
