@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Media Summarizer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Summarize video content using Gemini AI with customizable prompts",
   "permissions": [
     "storage",
