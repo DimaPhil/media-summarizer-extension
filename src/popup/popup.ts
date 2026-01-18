@@ -91,7 +91,8 @@ function detectPromptForVideo(videoInfo: VideoInfo): string {
 
 function renderVideoInfo(videoInfo: VideoInfo): void {
   elements.videoTitle.textContent = videoInfo.title;
-  elements.videoPlatform.textContent = videoInfo.platform.charAt(0).toUpperCase() + videoInfo.platform.slice(1);
+  elements.videoPlatform.textContent =
+    videoInfo.platform.charAt(0).toUpperCase() + videoInfo.platform.slice(1);
 
   if (videoInfo.duration) {
     elements.videoDuration.textContent = videoInfo.duration;

@@ -6,7 +6,6 @@ import type {
   CachedSummary,
   Platform,
 } from '../shared/types';
-import { CATEGORY_TO_PROMPT } from '../shared/constants';
 import { ErrorCode, SummarizationError, ERROR_MESSAGES } from '../shared/errors';
 import { storage } from './storage';
 import { GeminiClient, resetGeminiClient } from './gemini-client';
@@ -147,9 +146,10 @@ async function summarizeVideo(
       cached: false,
     };
   } catch (error) {
-    const summError = error instanceof SummarizationError
-      ? error
-      : new SummarizationError(ErrorCode.UNKNOWN_ERROR, String(error));
+    const summError =
+      error instanceof SummarizationError
+        ? error
+        : new SummarizationError(ErrorCode.UNKNOWN_ERROR, String(error));
 
     return {
       success: false,
@@ -167,23 +167,6 @@ async function testApiKey(apiKey: string): Promise<boolean> {
   }
 }
 
-async function getPromptForVideo(videoInfo: VideoInfo): Promise<string> {
-  const settings = await storage.getSettings();
-
-  if (settings.autoDetectCategory && videoInfo.platform === 'youtube' && settings.youtubeApiKey) {
-    const categoryData = await fetchVideoCategory(videoInfo.videoId, settings.youtubeApiKey);
-
-    if (categoryData?.categoryId) {
-      const mappedPromptId = CATEGORY_TO_PROMPT[categoryData.categoryId];
-      if (mappedPromptId) {
-        return mappedPromptId;
-      }
-    }
-  }
-
-  return settings.defaultPromptId;
-}
-
 chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) => {
   const handleMessage = async () => {
     switch (message.type) {
@@ -194,7 +177,10 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
           if (videoInfo && videoInfo.platform === 'youtube') {
             const settings = await storage.getSettings();
             if (settings.youtubeApiKey) {
-              const categoryData = await fetchVideoCategory(videoInfo.videoId, settings.youtubeApiKey);
+              const categoryData = await fetchVideoCategory(
+                videoInfo.videoId,
+                settings.youtubeApiKey
+              );
               if (categoryData) {
                 videoInfo.categoryId = categoryData.categoryId;
                 videoInfo.categoryName = categoryData.categoryName;
@@ -247,36 +233,53 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
         if (settings.streamResponse) {
           // Run async and return immediately for streaming
           summarizeVideo(request, timeoutMs, (chunk, done) => {
-            chrome.runtime.sendMessage({
-              type: 'SUMMARIZE_STREAM',
-              payload: { chunk, done },
-            }).catch((err) => {
-              console.debug('[Media Summarizer] Stream chunk send failed (popup may be closed):', err);
-            });
-          }).then((result) => {
-            markVideoComplete(videoId, platform);
-            if (!result.success) {
-              console.error('[Media Summarizer] Streaming summarization failed:', result.error);
-              chrome.runtime.sendMessage({
-                type: 'SUMMARIZE_RESPONSE',
-                payload: result,
-              }).catch((err) => {
-                console.debug('[Media Summarizer] Error response send failed (popup may be closed):', err);
+            chrome.runtime
+              .sendMessage({
+                type: 'SUMMARIZE_STREAM',
+                payload: { chunk, done },
+              })
+              .catch((err) => {
+                console.debug(
+                  '[Media Summarizer] Stream chunk send failed (popup may be closed):',
+                  err
+                );
               });
-            }
-          }).catch((error) => {
-            markVideoComplete(videoId, platform);
-            console.error('[Media Summarizer] Streaming summarization error:', error);
-            // Try to notify the popup about the error
-            chrome.runtime.sendMessage({
-              type: 'SUMMARIZE_RESPONSE',
-              payload: {
-                success: false,
-                error: error instanceof Error ? error.message : String(error),
-              },
-            }).catch(() => {});
-          });
-          return { type: 'SUMMARIZE_RESPONSE', payload: { success: true, summary: '', inProgress: true } };
+          })
+            .then((result) => {
+              markVideoComplete(videoId, platform);
+              if (!result.success) {
+                console.error('[Media Summarizer] Streaming summarization failed:', result.error);
+                chrome.runtime
+                  .sendMessage({
+                    type: 'SUMMARIZE_RESPONSE',
+                    payload: result,
+                  })
+                  .catch((err) => {
+                    console.debug(
+                      '[Media Summarizer] Error response send failed (popup may be closed):',
+                      err
+                    );
+                  });
+              }
+            })
+            .catch((error) => {
+              markVideoComplete(videoId, platform);
+              console.error('[Media Summarizer] Streaming summarization error:', error);
+              // Try to notify the popup about the error
+              chrome.runtime
+                .sendMessage({
+                  type: 'SUMMARIZE_RESPONSE',
+                  payload: {
+                    success: false,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                })
+                .catch(() => {});
+            });
+          return {
+            type: 'SUMMARIZE_RESPONSE',
+            payload: { success: true, summary: '', inProgress: true },
+          };
         }
 
         // Non-streaming: wait for result
@@ -342,10 +345,12 @@ chrome.runtime.onMessage.addListener((message: Message, sender, sendResponse) =>
     }
   };
 
-  handleMessage().then(sendResponse).catch((error) => {
-    console.error('[Media Summarizer] Message handler error:', error);
-    sendResponse({ error: String(error) });
-  });
+  handleMessage()
+    .then(sendResponse)
+    .catch((error) => {
+      console.error('[Media Summarizer] Message handler error:', error);
+      sendResponse({ error: String(error) });
+    });
 
   return true;
 });

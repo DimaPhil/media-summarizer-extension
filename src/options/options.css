@@ -135,7 +135,7 @@ body {
   align-items: center;
 }
 
-.input-row-compact input[type="number"] {
+.input-row-compact input[type='number'] {
   width: 80px;
   flex: none;
 }
@@ -145,9 +145,9 @@ body {
   font-size: 14px;
 }
 
-input[type="text"],
-input[type="password"],
-input[type="number"],
+input[type='text'],
+input[type='password'],
+input[type='number'],
 select,
 textarea {
   width: 100%;
@@ -203,7 +203,7 @@ select {
   font-weight: 400;
 }
 
-.checkbox-label input[type="checkbox"] {
+.checkbox-label input[type='checkbox'] {
   width: 18px;
   height: 18px;
   accent-color: var(--accent);

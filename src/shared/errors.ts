@@ -44,11 +44,19 @@ export function parseGeminiError(error: unknown): SummarizationError {
   const message = error instanceof Error ? error.message : String(error);
   const lowerMessage = message.toLowerCase();
 
-  if (lowerMessage.includes('api key') || lowerMessage.includes('401') || lowerMessage.includes('unauthorized')) {
+  if (
+    lowerMessage.includes('api key') ||
+    lowerMessage.includes('401') ||
+    lowerMessage.includes('unauthorized')
+  ) {
     return new SummarizationError(ErrorCode.INVALID_API_KEY, message);
   }
 
-  if (lowerMessage.includes('rate limit') || lowerMessage.includes('429') || lowerMessage.includes('quota')) {
+  if (
+    lowerMessage.includes('rate limit') ||
+    lowerMessage.includes('429') ||
+    lowerMessage.includes('quota')
+  ) {
     return new SummarizationError(ErrorCode.API_RATE_LIMIT, message);
   }
 
@@ -56,7 +64,11 @@ export function parseGeminiError(error: unknown): SummarizationError {
     return new SummarizationError(ErrorCode.PRIVATE_VIDEO, message);
   }
 
-  if (lowerMessage.includes('network') || lowerMessage.includes('fetch') || lowerMessage.includes('connection')) {
+  if (
+    lowerMessage.includes('network') ||
+    lowerMessage.includes('fetch') ||
+    lowerMessage.includes('connection')
+  ) {
     return new SummarizationError(ErrorCode.NETWORK_ERROR, message);
   }
 

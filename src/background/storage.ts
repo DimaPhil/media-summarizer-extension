@@ -1,4 +1,10 @@
-import type { ExtensionSettings, PromptTemplate, StorageData, CachedSummary, Platform } from '../shared/types';
+import type {
+  ExtensionSettings,
+  PromptTemplate,
+  StorageData,
+  CachedSummary,
+  Platform,
+} from '../shared/types';
 import { DEFAULT_SETTINGS, STORAGE_KEYS } from '../shared/constants';
 import { DEFAULT_PROMPTS } from '../lib/prompts';
 
@@ -83,18 +89,12 @@ class StorageManager {
   }
 
   async getAllData(): Promise<StorageData> {
-    const [settings, prompts] = await Promise.all([
-      this.getSettings(),
-      this.getPrompts(),
-    ]);
+    const [settings, prompts] = await Promise.all([this.getSettings(), this.getPrompts()]);
     return { settings, prompts };
   }
 
   async resetToDefaults(): Promise<void> {
-    await Promise.all([
-      this.saveSettings(DEFAULT_SETTINGS),
-      this.savePrompts(DEFAULT_PROMPTS),
-    ]);
+    await Promise.all([this.saveSettings(DEFAULT_SETTINGS), this.savePrompts(DEFAULT_PROMPTS)]);
     this.initialized = false;
   }
 

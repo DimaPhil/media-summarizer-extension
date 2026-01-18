@@ -114,9 +114,9 @@ function renderPromptOptions(): void {
 }
 
 function renderModelOptions(): void {
-  elements.geminiModel.innerHTML = GEMINI_MODELS
-    .map((m) => `<option value="${m.id}">${m.name}</option>`)
-    .join('');
+  elements.geminiModel.innerHTML = GEMINI_MODELS.map(
+    (m) => `<option value="${m.id}">${m.name}</option>`
+  ).join('');
   elements.geminiModel.value = currentSettings.geminiModel || DEFAULT_SETTINGS.geminiModel;
 }
 
@@ -239,7 +239,7 @@ async function testApiKey(): Promise<void> {
       elements.geminiTestResult.classList.add('error');
       elements.geminiTestResult.textContent = 'Invalid API key. Please check and try again.';
     }
-  } catch (error) {
+  } catch {
     elements.geminiTestResult.classList.remove('hidden', 'success');
     elements.geminiTestResult.classList.add('error');
     elements.geminiTestResult.textContent = 'Failed to test API key.';

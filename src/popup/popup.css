@@ -164,7 +164,7 @@ body {
   color: var(--text-secondary);
 }
 
-.auto-detect-row input[type="checkbox"] {
+.auto-detect-row input[type='checkbox'] {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
@@ -238,7 +238,9 @@ body {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .summary-header {

@@ -25,7 +25,9 @@ function extractVideoId(url: string, platform: Platform): string | null {
 }
 
 function getYouTubeTitle(): string {
-  const titleElement = document.querySelector('h1.ytd-video-primary-info-renderer yt-formatted-string');
+  const titleElement = document.querySelector(
+    'h1.ytd-video-primary-info-renderer yt-formatted-string'
+  );
   if (titleElement?.textContent) {
     return titleElement.textContent.trim();
   }
@@ -77,9 +79,7 @@ function getVideoInfo(): VideoInfo | null {
       break;
   }
 
-  const videoUrl = platform === 'youtube'
-    ? `https://www.youtube.com/watch?v=${videoId}`
-    : url;
+  const videoUrl = platform === 'youtube' ? `https://www.youtube.com/watch?v=${videoId}` : url;
 
   return {
     url: videoUrl,

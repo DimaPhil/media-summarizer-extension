@@ -22,10 +22,7 @@ export class GeminiClient {
         contents: [
           {
             role: 'user',
-            parts: [
-              { fileData: { fileUri: videoInfo.url } },
-              { text: prompt },
-            ],
+            parts: [{ fileData: { fileUri: videoInfo.url } }, { text: prompt }],
           },
         ],
       });
@@ -50,10 +47,7 @@ export class GeminiClient {
         contents: [
           {
             role: 'user',
-            parts: [
-              { fileData: { fileUri: videoInfo.url } },
-              { text: prompt },
-            ],
+            parts: [{ fileData: { fileUri: videoInfo.url } }, { text: prompt }],
           },
         ],
       });
