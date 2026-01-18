@@ -89,7 +89,7 @@ async function summarizeVideo(
   }
 
   try {
-    const client = new GeminiClient(settings.geminiApiKey);
+    const client = new GeminiClient(settings.geminiApiKey, settings.geminiModel);
 
     if (request.videoInfo.platform !== 'youtube') {
       return {

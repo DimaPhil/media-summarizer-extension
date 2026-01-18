@@ -14,6 +14,7 @@ export interface ExtensionSettings {
   streamResponse: boolean;
   theme: 'light' | 'dark' | 'system';
   summarizationTimeoutMinutes: number;
+  geminiModel: string;
 }
 
 export interface StorageData {

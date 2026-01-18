@@ -1,5 +1,5 @@
 import type { ExtensionSettings, PromptTemplate } from '../shared/types';
-import { DEFAULT_SETTINGS } from '../shared/constants';
+import { DEFAULT_SETTINGS, GEMINI_MODELS } from '../shared/constants';
 import { DEFAULT_PROMPTS } from '../lib/prompts';
 import './options.css';
 
@@ -10,6 +10,7 @@ const elements = {
   geminiTestResult: document.getElementById('gemini-test-result') as HTMLElement,
   youtubeApiKey: document.getElementById('youtube-api-key') as HTMLInputElement,
   toggleYoutubeKey: document.getElementById('toggle-youtube-key') as HTMLButtonElement,
+  geminiModel: document.getElementById('gemini-model') as HTMLSelectElement,
   defaultPrompt: document.getElementById('default-prompt') as HTMLSelectElement,
   autoDetectCategory: document.getElementById('auto-detect-category') as HTMLInputElement,
   streamResponse: document.getElementById('stream-response') as HTMLInputElement,
@@ -112,12 +113,20 @@ function renderPromptOptions(): void {
   elements.defaultPrompt.value = currentSettings.defaultPromptId;
 }
 
+function renderModelOptions(): void {
+  elements.geminiModel.innerHTML = GEMINI_MODELS
+    .map((m) => `<option value="${m.id}">${m.name}</option>`)
+    .join('');
+  elements.geminiModel.value = currentSettings.geminiModel || DEFAULT_SETTINGS.geminiModel;
+}
+
 function loadSettingsToForm(): void {
   elements.geminiApiKey.value = currentSettings.geminiApiKey;
   elements.youtubeApiKey.value = currentSettings.youtubeApiKey;
   elements.autoDetectCategory.checked = currentSettings.autoDetectCategory;
   elements.streamResponse.checked = currentSettings.streamResponse;
   elements.timeoutMinutes.value = String(currentSettings.summarizationTimeoutMinutes || 5);
+  renderModelOptions();
   renderPromptOptions();
 }
 
@@ -133,6 +142,7 @@ function getSettingsFromForm(): ExtensionSettings {
     streamResponse: elements.streamResponse.checked,
     theme: currentSettings.theme,
     summarizationTimeoutMinutes: timeoutMinutes,
+    geminiModel: elements.geminiModel.value,
   };
 }
 

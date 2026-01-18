@@ -1,6 +1,15 @@
 import type { ExtensionSettings } from './types';
 
-export const GEMINI_MODEL = 'gemini-2.0-flash';
+export const GEMINI_MODELS = [
+  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash' },
+  { id: 'gemini-2.0-flash-lite', name: 'Gemini 2.0 Flash Lite' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+  { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' },
+  { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Preview)' },
+  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)' },
+] as const;
+
+export const DEFAULT_MODEL = 'gemini-2.5-flash';
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
   geminiApiKey: '',
@@ -10,6 +19,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   streamResponse: true,
   theme: 'system',
   summarizationTimeoutMinutes: 5,
+  geminiModel: DEFAULT_MODEL,
 };
 
 export const YOUTUBE_CATEGORIES: Record<string, string> = {

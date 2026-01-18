@@ -1,22 +1,24 @@
 import { GoogleGenAI } from '@google/genai';
 import type { VideoInfo } from '../shared/types';
-import { GEMINI_MODEL } from '../shared/constants';
+import { DEFAULT_MODEL } from '../shared/constants';
 import { ErrorCode, SummarizationError, parseGeminiError } from '../shared/errors';
 
 export class GeminiClient {
   private ai: GoogleGenAI;
+  private model: string;
 
-  constructor(apiKey: string) {
+  constructor(apiKey: string, model?: string) {
     if (!apiKey) {
       throw new SummarizationError(ErrorCode.NO_API_KEY);
     }
     this.ai = new GoogleGenAI({ apiKey });
+    this.model = model || DEFAULT_MODEL;
   }
 
   async summarizeYouTubeVideo(videoInfo: VideoInfo, prompt: string): Promise<string> {
     try {
       const response = await this.ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: this.model,
         contents: [
           {
             role: 'user',
@@ -44,7 +46,7 @@ export class GeminiClient {
   ): AsyncGenerator<string, void, unknown> {
     try {
       const response = await this.ai.models.generateContentStream({
-        model: GEMINI_MODEL,
+        model: this.model,
         contents: [
           {
             role: 'user',
@@ -70,7 +72,7 @@ export class GeminiClient {
   async summarizeTranscript(transcript: string, prompt: string): Promise<string> {
     try {
       const response = await this.ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: this.model,
         contents: `${prompt}\n\n---\n\nTranscript:\n${transcript}`,
       });
 
@@ -87,7 +89,7 @@ export class GeminiClient {
   async testConnection(): Promise<boolean> {
     try {
       const response = await this.ai.models.generateContent({
-        model: GEMINI_MODEL,
+        model: this.model,
         contents: 'Say "OK" if you can read this.',
       });
       return !!response.text;
