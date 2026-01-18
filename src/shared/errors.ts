@@ -7,6 +7,7 @@ export enum ErrorCode {
   NETWORK_ERROR = 'NETWORK_ERROR',
   UNSUPPORTED_PLATFORM = 'UNSUPPORTED_PLATFORM',
   NO_API_KEY = 'NO_API_KEY',
+  TIMEOUT = 'TIMEOUT',
   UNKNOWN_ERROR = 'UNKNOWN_ERROR',
 }
 
@@ -19,6 +20,7 @@ export const ERROR_MESSAGES: Record<ErrorCode, string> = {
   [ErrorCode.NETWORK_ERROR]: 'Network error. Check your connection.',
   [ErrorCode.UNSUPPORTED_PLATFORM]: 'This video platform is not supported.',
   [ErrorCode.NO_API_KEY]: 'No API key configured. Add your Gemini API key in settings.',
+  [ErrorCode.TIMEOUT]: 'Summarization timed out. Try again or increase timeout in settings.',
   [ErrorCode.UNKNOWN_ERROR]: 'An unexpected error occurred.',
 };
 

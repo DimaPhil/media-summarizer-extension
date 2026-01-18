@@ -1,4 +1,4 @@
-import type { ExtensionSettings, PromptTemplate, StorageData } from '../shared/types';
+import type { ExtensionSettings, PromptTemplate, StorageData, CachedSummary, Platform } from '../shared/types';
 import { DEFAULT_SETTINGS, STORAGE_KEYS } from '../shared/constants';
 import { DEFAULT_PROMPTS } from '../lib/prompts';
 
@@ -96,6 +96,44 @@ class StorageManager {
       this.savePrompts(DEFAULT_PROMPTS),
     ]);
     this.initialized = false;
+  }
+
+  // Cache methods - use local storage for more space
+  private getCacheKey(videoId: string, platform: Platform): string {
+    return `${platform}:${videoId}`;
+  }
+
+  async getCachedSummary(videoId: string, platform: Platform): Promise<CachedSummary | null> {
+    const data = await chrome.storage.local.get(STORAGE_KEYS.CACHE);
+    const cache: Record<string, CachedSummary> = data[STORAGE_KEYS.CACHE] || {};
+    const key = this.getCacheKey(videoId, platform);
+    return cache[key] || null;
+  }
+
+  async saveCachedSummary(summary: CachedSummary): Promise<void> {
+    const data = await chrome.storage.local.get(STORAGE_KEYS.CACHE);
+    const cache: Record<string, CachedSummary> = data[STORAGE_KEYS.CACHE] || {};
+    const key = this.getCacheKey(summary.videoId, summary.platform);
+    cache[key] = summary;
+    await chrome.storage.local.set({ [STORAGE_KEYS.CACHE]: cache });
+  }
+
+  async clearCachedSummary(videoId: string, platform: Platform): Promise<void> {
+    const data = await chrome.storage.local.get(STORAGE_KEYS.CACHE);
+    const cache: Record<string, CachedSummary> = data[STORAGE_KEYS.CACHE] || {};
+    const key = this.getCacheKey(videoId, platform);
+    delete cache[key];
+    await chrome.storage.local.set({ [STORAGE_KEYS.CACHE]: cache });
+  }
+
+  async getAllCachedSummaries(): Promise<CachedSummary[]> {
+    const data = await chrome.storage.local.get(STORAGE_KEYS.CACHE);
+    const cache: Record<string, CachedSummary> = data[STORAGE_KEYS.CACHE] || {};
+    return Object.values(cache).sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  async clearAllCache(): Promise<void> {
+    await chrome.storage.local.remove(STORAGE_KEYS.CACHE);
   }
 }
 

@@ -3,6 +3,7 @@ import type {
   PromptTemplate,
   ExtensionSettings,
   SummarizationResult,
+  InProgressStatus,
 } from '../shared/types';
 import { CATEGORY_TO_PROMPT } from '../shared/constants';
 import './popup.css';
@@ -22,8 +23,9 @@ const elements = {
   summarizeBtn: document.getElementById('summarize-btn') as HTMLButtonElement,
   summarySection: document.getElementById('summary-section') as HTMLElement,
   summaryContent: document.getElementById('summary-content') as HTMLElement,
+  cachedBadge: document.getElementById('cached-badge') as HTMLElement,
   copyBtn: document.getElementById('copy-btn') as HTMLButtonElement,
-  retryBtn: document.getElementById('retry-btn') as HTMLButtonElement,
+  regenerateBtn: document.getElementById('regenerate-btn') as HTMLButtonElement,
   errorSection: document.getElementById('error-section') as HTMLElement,
   errorMessage: document.getElementById('error-message') as HTMLElement,
   errorRetryBtn: document.getElementById('error-retry-btn') as HTMLButtonElement,
@@ -155,14 +157,33 @@ async function initialize(): Promise<void> {
 
   renderVideoInfo(currentVideoInfo);
   showSection(elements.videoInfo);
+
+  // Check if summarization is already in progress for this video
+  const inProgressStatus = await sendMessage<InProgressStatus>('CHECK_IN_PROGRESS', {
+    videoId: currentVideoInfo.videoId,
+    platform: currentVideoInfo.platform,
+  });
+
+  if (inProgressStatus?.inProgress) {
+    // Show loading state - summarization is already running
+    setLoading(true);
+    elements.cachedBadge.classList.add('hidden');
+
+    // If we have the prompt ID, select it in the dropdown
+    if (inProgressStatus.promptId) {
+      elements.promptSelect.value = inProgressStatus.promptId;
+    }
+  }
 }
 
-async function summarize(): Promise<void> {
+async function summarize(forceRegenerate = false): Promise<void> {
   if (!currentVideoInfo || isLoading) return;
 
   setLoading(true);
   hideAllSections();
   showSection(elements.videoInfo);
+  elements.cachedBadge.classList.add('hidden');
+  elements.summaryContent.setAttribute('data-raw', '');
 
   const promptId = elements.promptSelect.value;
 
@@ -170,19 +191,38 @@ async function summarize(): Promise<void> {
     const result = await sendMessage<SummarizationResult>('SUMMARIZE', {
       videoInfo: currentVideoInfo,
       promptId,
+      forceRegenerate,
     });
+
+    // If already in progress, keep showing loading (streaming will update UI)
+    if (result.inProgress && !result.summary) {
+      // Summarization started or already running - wait for stream updates
+      return;
+    }
 
     if (result.success && result.summary) {
       renderSummary(result.summary);
       showSection(elements.summarySection);
-    } else {
+
+      // Show cached badge if result came from cache
+      if (result.cached) {
+        elements.cachedBadge.classList.remove('hidden');
+      } else {
+        elements.cachedBadge.classList.add('hidden');
+      }
+      setLoading(false);
+    } else if (!result.inProgress) {
       showError(result.error || 'Failed to summarize video');
+      setLoading(false);
     }
   } catch (error) {
     showError(String(error));
-  } finally {
     setLoading(false);
   }
+}
+
+async function regenerate(): Promise<void> {
+  await summarize(true);
 }
 
 function copyToClipboard(): void {
@@ -206,6 +246,8 @@ chrome.runtime.onMessage.addListener((message) => {
 
     if (!elements.summarySection.classList.contains('hidden') || chunk) {
       showSection(elements.summarySection);
+      // Streaming responses are never cached (they're fresh)
+      elements.cachedBadge.classList.add('hidden');
     }
 
     if (chunk) {
@@ -223,10 +265,10 @@ chrome.runtime.onMessage.addListener((message) => {
 
 elements.settingsBtn.addEventListener('click', openOptions);
 elements.openSettings.addEventListener('click', openOptions);
-elements.summarizeBtn.addEventListener('click', summarize);
+elements.summarizeBtn.addEventListener('click', () => summarize(false));
 elements.copyBtn.addEventListener('click', copyToClipboard);
-elements.retryBtn.addEventListener('click', summarize);
-elements.errorRetryBtn.addEventListener('click', summarize);
+elements.regenerateBtn.addEventListener('click', regenerate);
+elements.errorRetryBtn.addEventListener('click', () => summarize(false));
 
 elements.autoDetect.addEventListener('change', () => {
   if (elements.autoDetect.checked && currentVideoInfo) {

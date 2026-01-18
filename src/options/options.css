@@ -130,8 +130,24 @@ body {
   flex: 1;
 }
 
+.input-row-compact {
+  max-width: 200px;
+  align-items: center;
+}
+
+.input-row-compact input[type="number"] {
+  width: 80px;
+  flex: none;
+}
+
+.input-suffix {
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
 input[type="text"],
 input[type="password"],
+input[type="number"],
 select,
 textarea {
   width: 100%;

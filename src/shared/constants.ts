@@ -9,6 +9,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   autoDetectCategory: true,
   streamResponse: true,
   theme: 'system',
+  summarizationTimeoutMinutes: 5,
 };
 
 export const YOUTUBE_CATEGORIES: Record<string, string> = {
@@ -48,6 +49,7 @@ export const CATEGORY_TO_PROMPT: Record<string, string> = {
 export const STORAGE_KEYS = {
   SETTINGS: 'settings',
   PROMPTS: 'prompts',
+  CACHE: 'summaryCache',
 } as const;
 
 export const PLATFORM_PATTERNS: Record<string, RegExp[]> = {

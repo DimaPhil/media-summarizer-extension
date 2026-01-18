@@ -34,9 +34,9 @@
 }
 
 body {
-  width: 380px;
+  width: 400px;
   min-height: 200px;
-  max-height: 600px;
+  max-height: 700px;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 14px;
   line-height: 1.5;
@@ -107,6 +107,16 @@ body {
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
+}
+
+.badge-cached {
+  background: var(--success);
+}
+
+.badge-sm {
+  padding: 1px 6px;
+  font-size: 10px;
+  margin-left: 8px;
 }
 
 .meta-item:not(:empty)::before {
@@ -251,7 +261,7 @@ body {
   background: var(--bg-secondary);
   border-radius: var(--radius);
   padding: 12px;
-  max-height: 300px;
+  max-height: 400px;
   overflow-y: auto;
   font-size: 13px;
   line-height: 1.6;

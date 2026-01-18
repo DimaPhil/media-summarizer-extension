@@ -13,6 +13,7 @@ const elements = {
   defaultPrompt: document.getElementById('default-prompt') as HTMLSelectElement,
   autoDetectCategory: document.getElementById('auto-detect-category') as HTMLInputElement,
   streamResponse: document.getElementById('stream-response') as HTMLInputElement,
+  timeoutMinutes: document.getElementById('timeout-minutes') as HTMLInputElement,
   promptsList: document.getElementById('prompts-list') as HTMLElement,
   addPrompt: document.getElementById('add-prompt') as HTMLButtonElement,
   resetDefaults: document.getElementById('reset-defaults') as HTMLButtonElement,
@@ -116,10 +117,14 @@ function loadSettingsToForm(): void {
   elements.youtubeApiKey.value = currentSettings.youtubeApiKey;
   elements.autoDetectCategory.checked = currentSettings.autoDetectCategory;
   elements.streamResponse.checked = currentSettings.streamResponse;
+  elements.timeoutMinutes.value = String(currentSettings.summarizationTimeoutMinutes || 5);
   renderPromptOptions();
 }
 
 function getSettingsFromForm(): ExtensionSettings {
+  const timeoutValue = parseInt(elements.timeoutMinutes.value, 10);
+  const timeoutMinutes = Math.min(30, Math.max(1, isNaN(timeoutValue) ? 5 : timeoutValue));
+
   return {
     geminiApiKey: elements.geminiApiKey.value.trim(),
     youtubeApiKey: elements.youtubeApiKey.value.trim(),
@@ -127,6 +132,7 @@ function getSettingsFromForm(): ExtensionSettings {
     autoDetectCategory: elements.autoDetectCategory.checked,
     streamResponse: elements.streamResponse.checked,
     theme: currentSettings.theme,
+    summarizationTimeoutMinutes: timeoutMinutes,
   };
 }
 

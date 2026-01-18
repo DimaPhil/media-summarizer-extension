@@ -13,6 +13,7 @@ export interface ExtensionSettings {
   autoDetectCategory: boolean;
   streamResponse: boolean;
   theme: 'light' | 'dark' | 'system';
+  summarizationTimeoutMinutes: number;
 }
 
 export interface StorageData {
@@ -41,6 +42,25 @@ export interface SummarizationResult {
   success: boolean;
   summary?: string;
   error?: string;
+  cached?: boolean;
+  inProgress?: boolean;
+}
+
+export interface InProgressStatus {
+  inProgress: boolean;
+  startTime?: number;
+  promptId?: string;
+}
+
+export interface CachedSummary {
+  videoId: string;
+  platform: Platform;
+  videoTitle: string;
+  videoUrl: string;
+  promptId: string;
+  promptName: string;
+  summary: string;
+  timestamp: number;
 }
 
 export type MessageType =
@@ -54,7 +74,13 @@ export type MessageType =
   | 'GET_PROMPTS'
   | 'PROMPTS_RESPONSE'
   | 'TEST_API_KEY'
-  | 'API_KEY_TEST_RESULT';
+  | 'API_KEY_TEST_RESULT'
+  | 'GET_CACHED_SUMMARY'
+  | 'CACHED_SUMMARY_RESPONSE'
+  | 'CLEAR_CACHED_SUMMARY'
+  | 'GET_ALL_CACHED_SUMMARIES'
+  | 'CHECK_IN_PROGRESS'
+  | 'IN_PROGRESS_RESPONSE';
 
 export interface Message {
   type: MessageType;
