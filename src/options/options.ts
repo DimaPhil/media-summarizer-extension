@@ -1,4 +1,4 @@
-import type { ExtensionSettings, PromptTemplate } from '../shared/types';
+import type { ExtensionSettings, PromptTemplate, StorageData } from '../shared/types';
 import { DEFAULT_SETTINGS, GEMINI_MODELS } from '../shared/constants';
 import { DEFAULT_PROMPTS } from '../lib/prompts';
 import './options.css';
@@ -252,10 +252,8 @@ async function testApiKey(): Promise<void> {
 async function saveAllSettings(): Promise<void> {
   const settings = getSettingsFromForm();
 
-  await chrome.storage.sync.set({
-    settings,
-    prompts: currentPrompts,
-  });
+  await sendMessage<ExtensionSettings>('SAVE_SETTINGS', settings);
+  await sendMessage<PromptTemplate[]>('SAVE_PROMPTS', currentPrompts);
 
   currentSettings = settings;
   showToast('Settings saved');
@@ -267,10 +265,11 @@ async function resetToDefaults(): Promise<void> {
   currentSettings = { ...DEFAULT_SETTINGS };
   currentPrompts = [...DEFAULT_PROMPTS];
 
-  await chrome.storage.sync.set({
-    settings: currentSettings,
-    prompts: currentPrompts,
-  });
+  const data = await sendMessage<StorageData>('RESET_DEFAULTS');
+  if (data?.settings && data?.prompts) {
+    currentSettings = data.settings;
+    currentPrompts = data.prompts;
+  }
 
   loadSettingsToForm();
   renderPrompts();
@@ -278,14 +277,17 @@ async function resetToDefaults(): Promise<void> {
 }
 
 async function initialize(): Promise<void> {
-  const data = await chrome.storage.sync.get(['settings', 'prompts']);
+  const [settings, prompts] = await Promise.all([
+    sendMessage<ExtensionSettings>('GET_SETTINGS'),
+    sendMessage<PromptTemplate[]>('GET_PROMPTS'),
+  ]);
 
-  if (data.settings) {
-    currentSettings = { ...DEFAULT_SETTINGS, ...data.settings };
+  if (settings) {
+    currentSettings = { ...DEFAULT_SETTINGS, ...settings };
   }
 
-  if (data.prompts) {
-    currentPrompts = data.prompts;
+  if (prompts?.length) {
+    currentPrompts = prompts;
   }
 
   loadSettingsToForm();

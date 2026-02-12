@@ -60,6 +60,20 @@ export const STORAGE_KEYS = {
   SETTINGS: 'settings',
   PROMPTS: 'prompts',
   CACHE: 'summaryCache',
+  PROMPTS_MIGRATED: 'promptsMigratedToLocal',
+} as const;
+
+export const JOB_DB = {
+  NAME: 'media_summarizer',
+  VERSION: 1,
+  STORES: {
+    JOBS: 'jobs',
+    ACTIVE_BY_VIDEO_KEY: 'activeByVideoKey',
+    META: 'meta',
+  },
+  META_KEYS: {
+    CACHE_MIGRATED: 'cacheMigratedToJobs',
+  },
 } as const;
 
 export const PLATFORM_PATTERNS: Record<string, RegExp[]> = {

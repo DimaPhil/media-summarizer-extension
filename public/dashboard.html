@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Media Summarizer Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <div class="page">
+    <header class="header">
+      <div>
+        <h1>Jobs Dashboard</h1>
+        <p>Live status, history, prompt snapshots, and manual edits.</p>
+      </div>
+      <button id="clear-all-btn" class="btn btn-secondary" type="button">Clear History</button>
+    </header>
+
+    <main class="grid">
+      <section class="panel">
+        <div class="panel-header">
+          <div class="panel-title">All Jobs</div>
+        </div>
+        <div id="jobs-list" class="jobs-list"></div>
+        <div id="empty-state" class="empty-state hidden">No jobs yet. Run a summary from the popup to populate history.</div>
+      </section>
+
+      <section class="panel detail">
+        <div id="detail-placeholder" class="detail-placeholder">Select a job to inspect details.</div>
+
+        <div id="detail-panel" class="hidden">
+          <div class="detail-header">
+            <h2 id="detail-title" class="detail-title"></h2>
+            <span id="detail-status" class="status-badge"></span>
+          </div>
+
+          <div id="detail-meta" class="detail-meta"></div>
+          <a id="detail-link" class="detail-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+
+          <div class="block">
+            <h3>Output</h3>
+            <div id="output-rendered" class="output-rendered"></div>
+            <pre id="output-raw" class="output-raw"></pre>
+          </div>
+
+          <div class="block">
+            <div class="actions" style="margin-bottom: 8px;">
+              <button id="view-prompt-btn" class="btn btn-secondary" type="button">View Prompt Used</button>
+            </div>
+            <pre id="prompt-snapshot" class="prompt-snapshot hidden"></pre>
+          </div>
+
+          <div class="block">
+            <h3>Manual Edit</h3>
+            <textarea id="edited-text" class="edited-text" placeholder="Edit generated transcription here..."></textarea>
+            <div class="actions" style="margin-top: 8px;">
+              <button id="save-edit-btn" class="btn btn-primary" type="button">Save Edit</button>
+              <button id="restart-btn" class="btn btn-secondary" type="button">Restart Job</button>
+              <button id="delete-btn" class="btn btn-secondary" type="button">Delete Job</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"><span id="toast-message"></span></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

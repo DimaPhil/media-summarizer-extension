@@ -45,12 +45,15 @@ export interface SummarizationResult {
   error?: string;
   cached?: boolean;
   inProgress?: boolean;
+  jobId?: string;
+  status?: JobStatus;
 }
 
 export interface InProgressStatus {
   inProgress: boolean;
   startTime?: number;
   promptId?: string;
+  jobId?: string;
 }
 
 export interface CachedSummary {
@@ -64,16 +67,76 @@ export interface CachedSummary {
   timestamp: number;
 }
 
+export type JobStatus = 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED';
+
+export interface JobSegment {
+  index: number;
+  startSec: number;
+  endSec: number;
+  outputText: string;
+}
+
+export interface JobModelSnapshot {
+  model: string;
+  streamResponse: boolean;
+  summarizationTimeoutMinutes: number;
+  chunkingUsed: boolean;
+  chunkDurationSec?: number;
+  chunkOverlapSec?: number;
+}
+
+export interface Job {
+  jobId: string;
+  videoKey: string;
+  platform: Platform;
+  videoId: string;
+  videoUrl: string;
+  videoTitle: string;
+  thumbnailUrl?: string;
+  categoryId?: string;
+  categoryName?: string;
+  promptId: string;
+  promptName: string;
+  promptTextSnapshot: string;
+  modelSnapshot: JobModelSnapshot;
+  status: JobStatus;
+  createdAt: number;
+  startedAt: number;
+  updatedAt: number;
+  finishedAt?: number;
+  outputText: string;
+  editedText?: string;
+  errorMessage?: string;
+  segments?: JobSegment[];
+  mergeOutputText?: string;
+}
+
+export interface JobListQuery {
+  status?: JobStatus;
+  limit?: number;
+}
+
+export interface StartJobRequest {
+  videoInfo: VideoInfo;
+  promptId: string;
+  forceRegenerate?: boolean;
+}
+
 export type MessageType =
   | 'GET_VIDEO_INFO'
   | 'VIDEO_INFO_RESPONSE'
   | 'SUMMARIZE'
+  | 'START_JOB'
   | 'SUMMARIZE_RESPONSE'
   | 'SUMMARIZE_STREAM'
+  | 'JOB_UPDATED'
   | 'GET_SETTINGS'
   | 'SETTINGS_RESPONSE'
+  | 'SAVE_SETTINGS'
   | 'GET_PROMPTS'
   | 'PROMPTS_RESPONSE'
+  | 'SAVE_PROMPTS'
+  | 'RESET_DEFAULTS'
   | 'TEST_API_KEY'
   | 'API_KEY_TEST_RESULT'
   | 'GET_CACHED_SUMMARY'
@@ -81,7 +144,16 @@ export type MessageType =
   | 'CLEAR_CACHED_SUMMARY'
   | 'GET_ALL_CACHED_SUMMARIES'
   | 'CHECK_IN_PROGRESS'
-  | 'IN_PROGRESS_RESPONSE';
+  | 'IN_PROGRESS_RESPONSE'
+  | 'GET_ACTIVE_JOB'
+  | 'ACTIVE_JOB_RESPONSE'
+  | 'GET_JOB'
+  | 'JOB_RESPONSE'
+  | 'LIST_JOBS'
+  | 'LIST_JOBS_RESPONSE'
+  | 'UPDATE_JOB_EDITED_TEXT'
+  | 'DELETE_JOB'
+  | 'CLEAR_ALL_JOBS';
 
 export interface Message {
   type: MessageType;

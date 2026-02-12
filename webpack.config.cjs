@@ -11,6 +11,7 @@ module.exports = (env, argv) => {
       'content': './src/content/content.ts',
       'popup': './src/popup/popup.ts',
       'options': './src/options/options.ts',
+      'dashboard': './src/dashboard/dashboard.ts',
     },
     output: {
       path: path.resolve(__dirname, 'dist'),

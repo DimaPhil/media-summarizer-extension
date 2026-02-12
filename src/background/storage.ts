@@ -14,13 +14,37 @@ class StorageManager {
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
-    const data = await chrome.storage.sync.get([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.PROMPTS]);
+    const [syncData, localData] = await Promise.all([
+      chrome.storage.sync.get([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.PROMPTS]),
+      chrome.storage.local.get([STORAGE_KEYS.PROMPTS, STORAGE_KEYS.PROMPTS_MIGRATED]),
+    ]);
 
-    if (!data[STORAGE_KEYS.SETTINGS]) {
+    if (!syncData[STORAGE_KEYS.SETTINGS]) {
       await this.saveSettings(DEFAULT_SETTINGS);
     }
 
-    if (!data[STORAGE_KEYS.PROMPTS]) {
+    const localPrompts = localData[STORAGE_KEYS.PROMPTS] as PromptTemplate[] | undefined;
+    const syncPrompts = syncData[STORAGE_KEYS.PROMPTS] as PromptTemplate[] | undefined;
+
+    if (!localPrompts || localPrompts.length === 0) {
+      if (syncPrompts && syncPrompts.length > 0) {
+        await chrome.storage.local.set({
+          [STORAGE_KEYS.PROMPTS]: syncPrompts,
+          [STORAGE_KEYS.PROMPTS_MIGRATED]: true,
+        });
+        await chrome.storage.sync.remove(STORAGE_KEYS.PROMPTS);
+      } else {
+        await this.savePrompts(DEFAULT_PROMPTS);
+      }
+    } else if (syncPrompts && syncPrompts.length > 0) {
+      // Clean up stale sync copy so future edits are not blocked by sync quota.
+      await chrome.storage.sync.remove(STORAGE_KEYS.PROMPTS);
+      await chrome.storage.local.set({ [STORAGE_KEYS.PROMPTS_MIGRATED]: true });
+    }
+
+    const finalLocal = await chrome.storage.local.get(STORAGE_KEYS.PROMPTS);
+    const finalPrompts = finalLocal[STORAGE_KEYS.PROMPTS] as PromptTemplate[] | undefined;
+    if (!finalPrompts || finalPrompts.length === 0) {
       await this.savePrompts(DEFAULT_PROMPTS);
     }
 
@@ -46,12 +70,31 @@ class StorageManager {
 
   async getPrompts(): Promise<PromptTemplate[]> {
     await this.initialize();
-    const data = await chrome.storage.sync.get(STORAGE_KEYS.PROMPTS);
-    return data[STORAGE_KEYS.PROMPTS] || DEFAULT_PROMPTS;
+    const localData = await chrome.storage.local.get(STORAGE_KEYS.PROMPTS);
+    const localPrompts = localData[STORAGE_KEYS.PROMPTS] as PromptTemplate[] | undefined;
+    if (localPrompts?.length) {
+      return localPrompts;
+    }
+
+    const syncData = await chrome.storage.sync.get(STORAGE_KEYS.PROMPTS);
+    const syncPrompts = syncData[STORAGE_KEYS.PROMPTS] as PromptTemplate[] | undefined;
+    if (syncPrompts?.length) {
+      await chrome.storage.local.set({
+        [STORAGE_KEYS.PROMPTS]: syncPrompts,
+        [STORAGE_KEYS.PROMPTS_MIGRATED]: true,
+      });
+      await chrome.storage.sync.remove(STORAGE_KEYS.PROMPTS);
+      return syncPrompts;
+    }
+
+    return DEFAULT_PROMPTS;
   }
 
   async savePrompts(prompts: PromptTemplate[]): Promise<void> {
-    await chrome.storage.sync.set({ [STORAGE_KEYS.PROMPTS]: prompts });
+    await chrome.storage.local.set({
+      [STORAGE_KEYS.PROMPTS]: prompts,
+      [STORAGE_KEYS.PROMPTS_MIGRATED]: true,
+    });
   }
 
   async addPrompt(prompt: PromptTemplate): Promise<PromptTemplate[]> {
@@ -94,7 +137,11 @@ class StorageManager {
   }
 
   async resetToDefaults(): Promise<void> {
-    await Promise.all([this.saveSettings(DEFAULT_SETTINGS), this.savePrompts(DEFAULT_PROMPTS)]);
+    await Promise.all([
+      this.saveSettings(DEFAULT_SETTINGS),
+      this.savePrompts(DEFAULT_PROMPTS),
+      chrome.storage.sync.remove(STORAGE_KEYS.PROMPTS),
+    ]);
     this.initialized = false;
   }
 
