@@ -617,159 +617,159 @@ chrome.runtime.onStartup.addListener(async () => {
 
 chrome.runtime.onMessage.addListener(
   (message: Message | { type: string; payload?: unknown }, _sender, sendResponse) => {
-  const handleMessage = async () => {
-    await ensureInitialized();
+    const handleMessage = async () => {
+      await ensureInitialized();
 
-    switch (message.type) {
-      case 'GET_VIDEO_INFO': {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs[0]?.id) {
-          const videoInfo = await getVideoInfoFromTab(tabs[0].id);
-          if (videoInfo && videoInfo.platform === 'youtube') {
-            const settings = await storage.getSettings();
-            if (settings.youtubeApiKey) {
-              const categoryData = await fetchVideoCategory(
-                videoInfo.videoId,
-                settings.youtubeApiKey
-              );
-              if (categoryData) {
-                videoInfo.categoryId = categoryData.categoryId;
-                videoInfo.categoryName = categoryData.categoryName;
-                videoInfo.title = categoryData.title || videoInfo.title;
+      switch (message.type) {
+        case 'GET_VIDEO_INFO': {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabs[0]?.id) {
+            const videoInfo = await getVideoInfoFromTab(tabs[0].id);
+            if (videoInfo && videoInfo.platform === 'youtube') {
+              const settings = await storage.getSettings();
+              if (settings.youtubeApiKey) {
+                const categoryData = await fetchVideoCategory(
+                  videoInfo.videoId,
+                  settings.youtubeApiKey
+                );
+                if (categoryData) {
+                  videoInfo.categoryId = categoryData.categoryId;
+                  videoInfo.categoryName = categoryData.categoryName;
+                  videoInfo.title = categoryData.title || videoInfo.title;
+                }
               }
             }
+            return { type: 'VIDEO_INFO_RESPONSE', payload: videoInfo };
           }
-          return { type: 'VIDEO_INFO_RESPONSE', payload: videoInfo };
+          return { type: 'VIDEO_INFO_RESPONSE', payload: null };
         }
-        return { type: 'VIDEO_INFO_RESPONSE', payload: null };
-      }
 
-      case 'SUMMARIZE':
-      case 'START_JOB': {
-        const request = message.payload as StartJobRequest;
-        const result = await startJob(request);
-        return { type: 'SUMMARIZE_RESPONSE', payload: result };
-      }
-
-      case 'GET_SETTINGS': {
-        const settings = await storage.getSettings();
-        return { type: 'SETTINGS_RESPONSE', payload: settings };
-      }
-
-      case 'SAVE_SETTINGS': {
-        const settings = message.payload as ExtensionSettings;
-        await storage.saveSettings(settings);
-        return { type: 'SETTINGS_RESPONSE', payload: settings };
-      }
-
-      case 'GET_PROMPTS': {
-        const prompts = await storage.getPrompts();
-        return { type: 'PROMPTS_RESPONSE', payload: prompts };
-      }
-
-      case 'SAVE_PROMPTS': {
-        const prompts = message.payload as PromptTemplate[];
-        await storage.savePrompts(prompts);
-        return { type: 'PROMPTS_RESPONSE', payload: prompts };
-      }
-
-      case 'RESET_DEFAULTS': {
-        await storage.resetToDefaults();
-        const allData = await storage.getAllData();
-        return { type: 'SETTINGS_RESPONSE', payload: allData };
-      }
-
-      case 'TEST_API_KEY': {
-        const apiKey = message.payload as string;
-        const isValid = await testApiKey(apiKey);
-        return { type: 'API_KEY_TEST_RESULT', payload: isValid };
-      }
-
-      case 'GET_CACHED_SUMMARY': {
-        const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-        const cached = await storage.getCachedSummary(videoId, platform);
-        return { type: 'CACHED_SUMMARY_RESPONSE', payload: cached };
-      }
-
-      case 'CLEAR_CACHED_SUMMARY': {
-        const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-        await storage.clearCachedSummary(videoId, platform);
-        return { type: 'CACHED_SUMMARY_RESPONSE', payload: null };
-      }
-
-      case 'GET_ALL_CACHED_SUMMARIES': {
-        const summaries = await storage.getAllCachedSummaries();
-        return { type: 'CACHED_SUMMARY_RESPONSE', payload: summaries };
-      }
-
-      case 'CHECK_IN_PROGRESS': {
-        const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-        const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
-        const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
-        return {
-          type: 'IN_PROGRESS_RESPONSE',
-          payload: {
-            inProgress: Boolean(activeJob && activeJob.status === 'RUNNING'),
-            startTime: activeJob?.startedAt,
-            promptId: activeJob?.promptId,
-            jobId: activeJob?.jobId,
-          },
-        };
-      }
-
-      case 'GET_ACTIVE_JOB': {
-        const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-        const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
-        const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
-        return { type: 'ACTIVE_JOB_RESPONSE', payload: activeJob };
-      }
-
-      case 'GET_JOB': {
-        const { jobId } = message.payload as { jobId: string };
-        const job = await jobStore.getJob(jobId);
-        return { type: 'JOB_RESPONSE', payload: job };
-      }
-
-      case 'LIST_JOBS': {
-        const query = (message.payload || {}) as JobListQuery;
-        const jobs = await jobStore.listJobs(query);
-        return { type: 'LIST_JOBS_RESPONSE', payload: jobs };
-      }
-
-      case 'UPDATE_JOB_EDITED_TEXT': {
-        const payload = message.payload as { jobId: string; editedText: string };
-        const job = await jobStore.updateEditedText(payload.jobId, payload.editedText);
-        if (job) {
-          notifyJobUpdated(job.jobId);
+        case 'SUMMARIZE':
+        case 'START_JOB': {
+          const request = message.payload as StartJobRequest;
+          const result = await startJob(request);
+          return { type: 'SUMMARIZE_RESPONSE', payload: result };
         }
-        return { type: 'JOB_RESPONSE', payload: job };
+
+        case 'GET_SETTINGS': {
+          const settings = await storage.getSettings();
+          return { type: 'SETTINGS_RESPONSE', payload: settings };
+        }
+
+        case 'SAVE_SETTINGS': {
+          const settings = message.payload as ExtensionSettings;
+          await storage.saveSettings(settings);
+          return { type: 'SETTINGS_RESPONSE', payload: settings };
+        }
+
+        case 'GET_PROMPTS': {
+          const prompts = await storage.getPrompts();
+          return { type: 'PROMPTS_RESPONSE', payload: prompts };
+        }
+
+        case 'SAVE_PROMPTS': {
+          const prompts = message.payload as PromptTemplate[];
+          await storage.savePrompts(prompts);
+          return { type: 'PROMPTS_RESPONSE', payload: prompts };
+        }
+
+        case 'RESET_DEFAULTS': {
+          await storage.resetToDefaults();
+          const allData = await storage.getAllData();
+          return { type: 'SETTINGS_RESPONSE', payload: allData };
+        }
+
+        case 'TEST_API_KEY': {
+          const apiKey = message.payload as string;
+          const isValid = await testApiKey(apiKey);
+          return { type: 'API_KEY_TEST_RESULT', payload: isValid };
+        }
+
+        case 'GET_CACHED_SUMMARY': {
+          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+          const cached = await storage.getCachedSummary(videoId, platform);
+          return { type: 'CACHED_SUMMARY_RESPONSE', payload: cached };
+        }
+
+        case 'CLEAR_CACHED_SUMMARY': {
+          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+          await storage.clearCachedSummary(videoId, platform);
+          return { type: 'CACHED_SUMMARY_RESPONSE', payload: null };
+        }
+
+        case 'GET_ALL_CACHED_SUMMARIES': {
+          const summaries = await storage.getAllCachedSummaries();
+          return { type: 'CACHED_SUMMARY_RESPONSE', payload: summaries };
+        }
+
+        case 'CHECK_IN_PROGRESS': {
+          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+          const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
+          const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
+          return {
+            type: 'IN_PROGRESS_RESPONSE',
+            payload: {
+              inProgress: Boolean(activeJob && activeJob.status === 'RUNNING'),
+              startTime: activeJob?.startedAt,
+              promptId: activeJob?.promptId,
+              jobId: activeJob?.jobId,
+            },
+          };
+        }
+
+        case 'GET_ACTIVE_JOB': {
+          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+          const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
+          const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
+          return { type: 'ACTIVE_JOB_RESPONSE', payload: activeJob };
+        }
+
+        case 'GET_JOB': {
+          const { jobId } = message.payload as { jobId: string };
+          const job = await jobStore.getJob(jobId);
+          return { type: 'JOB_RESPONSE', payload: job };
+        }
+
+        case 'LIST_JOBS': {
+          const query = (message.payload || {}) as JobListQuery;
+          const jobs = await jobStore.listJobs(query);
+          return { type: 'LIST_JOBS_RESPONSE', payload: jobs };
+        }
+
+        case 'UPDATE_JOB_EDITED_TEXT': {
+          const payload = message.payload as { jobId: string; editedText: string };
+          const job = await jobStore.updateEditedText(payload.jobId, payload.editedText);
+          if (job) {
+            notifyJobUpdated(job.jobId);
+          }
+          return { type: 'JOB_RESPONSE', payload: job };
+        }
+
+        case 'DELETE_JOB': {
+          const payload = message.payload as { jobId: string };
+          const deleted = await jobStore.deleteJob(payload.jobId);
+          return { type: 'JOB_RESPONSE', payload: { deleted } };
+        }
+
+        case 'CLEAR_ALL_JOBS': {
+          await jobStore.clearAllJobs();
+          return { type: 'JOB_RESPONSE', payload: { success: true } };
+        }
+
+        default:
+          return null;
       }
+    };
 
-      case 'DELETE_JOB': {
-        const payload = message.payload as { jobId: string };
-        const deleted = await jobStore.deleteJob(payload.jobId);
-        return { type: 'JOB_RESPONSE', payload: { deleted } };
-      }
+    handleMessage()
+      .then(sendResponse)
+      .catch((error) => {
+        console.error('[Media Summarizer] Message handler error:', error);
+        sendResponse({ error: String(error) });
+      });
 
-      case 'CLEAR_ALL_JOBS': {
-        await jobStore.clearAllJobs();
-        return { type: 'JOB_RESPONSE', payload: { success: true } };
-      }
-
-      default:
-        return null;
-    }
-  };
-
-  handleMessage()
-    .then(sendResponse)
-    .catch((error) => {
-      console.error('[Media Summarizer] Message handler error:', error);
-      sendResponse({ error: String(error) });
-    });
-
-  return true;
-}
+    return true;
+  }
 );
 
 chrome.storage.onChanged.addListener((changes) => {
