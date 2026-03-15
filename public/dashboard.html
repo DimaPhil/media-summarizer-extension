@@ -44,6 +44,8 @@
             <div id="detail-meta" class="detail-meta"></div>
             <a id="detail-link" class="detail-link" href="#" target="_blank" rel="noopener noreferrer"></a>
 
+            <div id="detail-error" class="detail-error hidden"></div>
+
             <div class="block">
               <h3>Output</h3>
               <div id="output-rendered" class="output-rendered"></div>
@@ -62,6 +64,7 @@
               <textarea id="edited-text" class="edited-text" placeholder="Edit generated transcription here..."></textarea>
               <div class="actions" style="margin-top: 8px;">
                 <button id="save-edit-btn" class="btn btn-primary" type="button">Save Edit</button>
+                <button id="cancel-job-btn" class="btn btn-secondary btn-danger-text hidden" type="button">Cancel Job</button>
                 <button id="restart-btn" class="btn btn-secondary" type="button">Restart Job</button>
                 <button id="delete-btn" class="btn btn-secondary" type="button">Delete Job</button>
               </div>
@@ -95,7 +98,7 @@
             </div>
           </div>
           <div class="channel-detail-actions">
-            <select id="batch-prompt-select" class="prompt-select"></select>
+            <label class="prompt-picker"><span class="prompt-picker-label">Prompt:</span><select id="batch-prompt-select" class="prompt-select"></select></label>
             <button id="batch-transcribe-btn" class="btn btn-primary" type="button">Transcribe All New</button>
             <button id="refresh-videos-btn" class="btn btn-secondary" type="button">Refresh Videos</button>
             <button id="remove-channel-btn" class="btn btn-secondary btn-danger-text" type="button">Remove</button>

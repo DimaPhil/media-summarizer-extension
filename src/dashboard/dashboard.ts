@@ -33,6 +33,7 @@ interface AnnotatedChannelVideo {
   discoveredAt: number;
   hasTranscription: boolean;
   isRunning: boolean;
+  isFailed: boolean;
   isNew: boolean;
 }
 
@@ -48,10 +49,12 @@ const elements = {
   detailStatus: document.getElementById('detail-status') as HTMLElement,
   detailMeta: document.getElementById('detail-meta') as HTMLElement,
   detailLink: document.getElementById('detail-link') as HTMLAnchorElement,
+  detailError: document.getElementById('detail-error') as HTMLElement,
   outputRendered: document.getElementById('output-rendered') as HTMLElement,
   outputRaw: document.getElementById('output-raw') as HTMLElement,
   editedText: document.getElementById('edited-text') as HTMLTextAreaElement,
   saveEditBtn: document.getElementById('save-edit-btn') as HTMLButtonElement,
+  cancelJobBtn: document.getElementById('cancel-job-btn') as HTMLButtonElement,
   restartBtn: document.getElementById('restart-btn') as HTMLButtonElement,
   deleteBtn: document.getElementById('delete-btn') as HTMLButtonElement,
   clearAllBtn: document.getElementById('clear-all-btn') as HTMLButtonElement,
@@ -194,6 +197,14 @@ function formatVideoCount(count: number, subscribed: boolean): string {
   return `${display} video${count !== 1 ? 's' : ''}`;
 }
 
+function splitErrorMessage(errorMessage: string): { summary: string; details: string } {
+  const match = errorMessage.match(/^(.+?)\s*\((.+)\)$/s);
+  if (match) {
+    return { summary: match[1], details: match[2] };
+  }
+  return { summary: errorMessage, details: '' };
+}
+
 function ensureThumbnailUrl(job: Job): string | null {
   if (job.thumbnailUrl) return job.thumbnailUrl;
   if (job.platform === 'youtube' && job.videoId) {
@@ -222,6 +233,8 @@ function switchTab(tab: 'jobs' | 'channels'): void {
 
   if (tab === 'channels') {
     void backfillThenLoadChannels();
+  } else {
+    stopChannelPoll();
   }
 }
 
@@ -304,6 +317,19 @@ function renderDetail(job: Job | null): void {
   elements.detailLink.href = job.videoUrl;
   elements.detailLink.textContent = job.videoUrl;
 
+  if (job.status === 'FAILED' && job.errorMessage) {
+    const { summary, details } = splitErrorMessage(job.errorMessage);
+    let html = `<div class="detail-error-summary">${escapeHtml(summary)}</div>`;
+    if (details) {
+      html += `<details class="detail-error-details"><summary>Technical details</summary><pre>${escapeHtml(details)}</pre></details>`;
+    }
+    elements.detailError.innerHTML = html;
+    elements.detailError.classList.remove('hidden');
+  } else {
+    elements.detailError.innerHTML = '';
+    elements.detailError.classList.add('hidden');
+  }
+
   const visibleText = job.editedText || job.outputText || '';
   elements.outputRendered.innerHTML = `<p>${simpleMarkdown(visibleText)}</p>`;
   elements.outputRaw.textContent = visibleText;
@@ -311,6 +337,7 @@ function renderDetail(job: Job | null): void {
   elements.promptSnapshot.textContent =
     job.promptTextSnapshot || 'No snapshot stored for this job.';
 
+  elements.cancelJobBtn.classList.toggle('hidden', job.status !== 'RUNNING');
   elements.saveEditBtn.disabled = job.status === 'RUNNING';
   elements.restartBtn.disabled = job.status === 'RUNNING';
 }
@@ -428,6 +455,15 @@ async function deleteSelectedJob(): Promise<void> {
   showToast('Job deleted');
 }
 
+async function cancelSelectedJob(): Promise<void> {
+  const job = findJob(selectedJobId);
+  if (!job || job.status !== 'RUNNING') return;
+
+  await sendMessage('CANCEL_JOB', { jobId: job.jobId });
+  await refreshSingleJob(job.jobId);
+  showToast('Job canceled');
+}
+
 async function clearAllJobs(): Promise<void> {
   const confirmed = confirm('Clear all history? This cannot be undone.');
   if (!confirmed) return;
@@ -536,8 +572,8 @@ async function openChannelDetail(channelId: string): Promise<void> {
     }
 
     // Toggle buttons based on subscription state
+    // Prompt select is always visible so users see which prompt transcriptions use
     const subscribed = channel.subscribed;
-    elements.batchPromptSelect.classList.toggle('hidden', !subscribed);
     elements.batchTranscribeBtn.classList.toggle('hidden', !subscribed);
     elements.refreshVideosBtn.classList.toggle('hidden', !subscribed);
     elements.removeChannelBtn.classList.toggle('hidden', !subscribed);
@@ -548,15 +584,46 @@ async function openChannelDetail(channelId: string): Promise<void> {
 }
 
 function closeChannelDetail(): void {
+  stopChannelPoll();
   selectedChannelId = null;
   elements.channelDetailView.classList.add('hidden');
   elements.channelsListView.classList.remove('hidden');
   void loadChannels();
 }
 
+let channelPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startChannelPollIfNeeded(): void {
+  stopChannelPoll();
+  const hasRunning = channelVideos.some((v) => v.isRunning);
+  if (hasRunning && selectedChannelId) {
+    const chId = selectedChannelId;
+    channelPollTimer = setInterval(() => {
+      if (selectedChannelId === chId) {
+        void loadChannelVideos(chId);
+      } else {
+        stopChannelPoll();
+      }
+    }, 3000);
+  }
+}
+
+function stopChannelPoll(): void {
+  if (channelPollTimer) {
+    clearInterval(channelPollTimer);
+    channelPollTimer = null;
+  }
+}
+
 async function loadChannelVideos(channelId: string): Promise<void> {
   channelVideos = await sendMessage<AnnotatedChannelVideo[]>('LIST_CHANNEL_VIDEOS', { channelId });
   renderChannelVideos();
+  startChannelPollIfNeeded();
+}
+
+function getSelectedPromptName(): string {
+  const selected = prompts.find((p) => p.id === elements.batchPromptSelect.value);
+  return selected?.name || 'Default';
 }
 
 function renderChannelVideos(): void {
@@ -565,6 +632,8 @@ function renderChannelVideos(): void {
       '<div class="empty-state">No videos found for this channel.</div>';
     return;
   }
+
+  const promptName = getSelectedPromptName();
 
   elements.channelVideosList.innerHTML = channelVideos
     .map((v) => {
@@ -576,6 +645,9 @@ function renderChannelVideos(): void {
       } else if (v.isRunning) {
         stateClass = 'cv-running';
         statusLabel = '<span class="status-badge status-running">Running</span>';
+      } else if (v.isFailed) {
+        stateClass = 'cv-failed';
+        statusLabel = '<span class="status-badge status-failed">Failed</span>';
       } else if (v.ignored) {
         stateClass = 'cv-ignored';
         statusLabel = '<span class="status-badge status-canceled">Ignored</span>';
@@ -590,10 +662,22 @@ function renderChannelVideos(): void {
 
       const actionBtns: string[] = [];
       if (v.isRunning) {
-        // No action buttons while running
+        actionBtns.push(
+          `<button class="btn btn-secondary btn-sm btn-danger-text cv-cancel-btn" data-video-id="${v.videoId}" type="button">Cancel</button>`
+        );
+      } else if (v.isFailed) {
+        actionBtns.push(
+          `<button class="btn btn-primary btn-sm cv-transcribe-btn" data-video-id="${v.videoId}" type="button">Retry &middot; ${escapeHtml(promptName)}</button>`
+        );
+        actionBtns.push(
+          `<button class="btn btn-secondary btn-sm cv-view-job-btn" data-video-id="${v.videoId}" data-status="FAILED" type="button">View Error</button>`
+        );
       } else if (v.hasTranscription) {
         actionBtns.push(
           `<button class="btn btn-primary btn-sm cv-view-job-btn" data-video-id="${v.videoId}" type="button">View Result</button>`
+        );
+        actionBtns.push(
+          `<button class="btn btn-secondary btn-sm cv-retranscribe-btn" data-video-id="${v.videoId}" type="button">Re-transcribe &middot; ${escapeHtml(promptName)}</button>`
         );
         actionBtns.push(
           `<a class="btn btn-secondary btn-sm" href="https://www.youtube.com/watch?v=${v.videoId}" target="_blank" rel="noopener">Open Video</a>`
@@ -603,11 +687,11 @@ function renderChannelVideos(): void {
           `<button class="btn btn-secondary btn-sm cv-unignore-btn" data-video-id="${v.videoId}" type="button">Un-ignore</button>`
         );
         actionBtns.push(
-          `<button class="btn btn-primary btn-sm cv-transcribe-btn" data-video-id="${v.videoId}" type="button">Transcribe</button>`
+          `<button class="btn btn-primary btn-sm cv-transcribe-btn" data-video-id="${v.videoId}" type="button">Transcribe &middot; ${escapeHtml(promptName)}</button>`
         );
       } else {
         actionBtns.push(
-          `<button class="btn btn-primary btn-sm cv-transcribe-btn" data-video-id="${v.videoId}" type="button">Transcribe</button>`
+          `<button class="btn btn-primary btn-sm cv-transcribe-btn" data-video-id="${v.videoId}" type="button">Transcribe &middot; ${escapeHtml(promptName)}</button>`
         );
         actionBtns.push(
           `<button class="btn btn-secondary btn-sm cv-ignore-btn" data-video-id="${v.videoId}" type="button">Ignore</button>`
@@ -645,8 +729,18 @@ function renderChannelVideos(): void {
   elements.channelVideosList.querySelectorAll('.cv-view-job-btn').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
+      const el = btn as HTMLElement;
+      const videoId = el.dataset.videoId;
+      const status = el.dataset.status;
+      if (videoId) void viewJobForVideo(videoId, status);
+    });
+  });
+
+  elements.channelVideosList.querySelectorAll('.cv-retranscribe-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
       const videoId = (btn as HTMLElement).dataset.videoId;
-      if (videoId) void viewJobForVideo(videoId);
+      if (videoId) void transcribeSingleVideo(videoId, true);
     });
   });
 
@@ -665,37 +759,53 @@ function renderChannelVideos(): void {
       if (videoId) void toggleIgnore(videoId, false);
     });
   });
+
+  elements.channelVideosList.querySelectorAll('.cv-cancel-btn').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const videoId = (btn as HTMLElement).dataset.videoId;
+      if (videoId) void cancelChannelVideo(videoId);
+    });
+  });
 }
 
-async function viewJobForVideo(videoId: string): Promise<void> {
-  // Find the latest succeeded job for this video
-  const matchingJob = jobs.find((j) => j.videoId === videoId && j.status === 'SUCCEEDED');
-  if (matchingJob) {
-    selectedJobId = matchingJob.jobId;
-    switchTab('jobs');
-    renderJobsList();
-    renderDetail(matchingJob);
-    return;
+async function viewJobForVideo(videoId: string, statusFilter?: string): Promise<void> {
+  const targetStatus = statusFilter || 'SUCCEEDED';
+  const findMatch = () =>
+    jobs.find((j) => j.videoId === videoId && j.status === targetStatus) ||
+    (targetStatus !== 'SUCCEEDED'
+      ? jobs.find((j) => j.videoId === videoId && j.status === 'SUCCEEDED')
+      : undefined);
+
+  let match = findMatch();
+  if (!match) {
+    await loadJobs();
+    match = findMatch();
   }
-  // If not loaded yet, reload jobs and try again
-  await loadJobs();
-  const job = jobs.find((j) => j.videoId === videoId && j.status === 'SUCCEEDED');
-  if (job) {
-    selectedJobId = job.jobId;
+
+  if (match) {
+    selectedJobId = match.jobId;
     switchTab('jobs');
     renderJobsList();
-    renderDetail(job);
+    renderDetail(match);
   } else {
     showToast('Job not found');
   }
 }
 
-async function transcribeSingleVideo(videoId: string): Promise<void> {
+async function transcribeSingleVideo(videoId: string, forceRegenerate = false): Promise<void> {
   const video = channelVideos.find((v) => v.videoId === videoId);
   if (!video) return;
 
   const promptId = elements.batchPromptSelect.value;
   const channel = channels.find((c) => c.channelId === video.channelId);
+
+  // Optimistic UI: immediately show running state
+  const idx = channelVideos.findIndex((v) => v.videoId === videoId);
+  if (idx !== -1) {
+    channelVideos[idx] = { ...channelVideos[idx], isRunning: true };
+    renderChannelVideos();
+  }
 
   const videoInfo: VideoInfo = {
     url: `https://www.youtube.com/watch?v=${video.videoId}`,
@@ -707,17 +817,55 @@ async function transcribeSingleVideo(videoId: string): Promise<void> {
     channelTitle: channel?.title,
   };
 
-  const result = await startJobWithFallback({
-    videoInfo,
-    promptId,
-    forceRegenerate: false,
+  try {
+    const result = await startJobWithFallback({
+      videoInfo,
+      promptId,
+      forceRegenerate,
+    });
+
+    if (result.inProgress || result.success) {
+      showToast('Job started');
+      // Explicitly refresh from backend after a short delay to confirm running state
+      if (selectedChannelId) {
+        const chId = selectedChannelId;
+        setTimeout(() => {
+          if (selectedChannelId === chId) void loadChannelVideos(chId);
+        }, 500);
+      }
+    } else {
+      // Revert optimistic update on failure
+      if (idx !== -1) {
+        channelVideos[idx] = { ...channelVideos[idx], isRunning: false };
+        renderChannelVideos();
+      }
+      showToast(result.error || 'Failed to start job');
+    }
+  } catch (error) {
+    // Revert optimistic update on error
+    if (idx !== -1) {
+      channelVideos[idx] = { ...channelVideos[idx], isRunning: false };
+      renderChannelVideos();
+    }
+    showToast('Failed to start job: ' + String(error));
+  }
+}
+
+async function cancelChannelVideo(videoId: string): Promise<void> {
+  // Find the running job for this video
+  const activeJob = await sendMessage<Job | null>('GET_ACTIVE_JOB', {
+    videoId,
+    platform: 'youtube',
   });
 
-  if (result.inProgress || result.success) {
-    showToast('Job started');
-  } else {
-    showToast(result.error || 'Failed to start job');
+  if (activeJob && activeJob.status === 'RUNNING') {
+    await sendMessage('CANCEL_JOB', { jobId: activeJob.jobId });
   }
+
+  if (selectedChannelId) {
+    await loadChannelVideos(selectedChannelId);
+  }
+  showToast('Job canceled');
 }
 
 async function toggleIgnore(videoId: string, ignored: boolean): Promise<void> {
@@ -751,6 +899,13 @@ async function batchTranscribe(): Promise<void> {
       promptId,
     });
     showToast(`Queued ${newCount} transcription(s)`);
+    // Refresh to show running state
+    if (selectedChannelId) {
+      const chId = selectedChannelId;
+      setTimeout(() => {
+        if (selectedChannelId === chId) void loadChannelVideos(chId);
+      }, 500);
+    }
   } catch (error) {
     showToast('Batch transcribe failed: ' + String(error));
   } finally {
@@ -890,6 +1045,10 @@ function bindEvents(): void {
     void saveEditedText();
   });
 
+  elements.cancelJobBtn.addEventListener('click', () => {
+    void cancelSelectedJob();
+  });
+
   elements.restartBtn.addEventListener('click', () => {
     void restartJob();
   });
@@ -918,6 +1077,11 @@ function bindEvents(): void {
   });
   elements.subscribeChannelBtn.addEventListener('click', () => {
     void subscribeChannel();
+  });
+
+  // Re-render video list when prompt selection changes (updates button labels)
+  elements.batchPromptSelect.addEventListener('change', () => {
+    if (channelVideos.length > 0) renderChannelVideos();
   });
 
   // Modal

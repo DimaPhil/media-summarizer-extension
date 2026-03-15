@@ -311,6 +311,45 @@ body {
   white-space: nowrap;
 }
 
+.detail-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.detail-error-summary {
+  color: var(--danger);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.detail-error-details {
+  margin-top: 8px;
+  font-size: 11px;
+  color: #6b7280;
+}
+
+.detail-error-details summary {
+  cursor: pointer;
+  user-select: none;
+  color: #9ca3af;
+}
+
+.detail-error-details pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  background: #fff5f5;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
 .block {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -521,6 +560,19 @@ body {
   gap: 8px;
 }
 
+.prompt-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.prompt-picker-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-soft);
+  white-space: nowrap;
+}
+
 .prompt-select {
   padding: 8px 10px;
   border: 1px solid var(--line);
@@ -558,6 +610,11 @@ body {
 
 .cv-item.cv-new {
   border-color: var(--warn);
+}
+
+.cv-item.cv-failed {
+  border-color: var(--danger);
+  background: #fef2f2;
 }
 
 .cv-item.cv-ignored {

@@ -33,6 +33,7 @@ const elements = {
   errorSection: document.getElementById('error-section') as HTMLElement,
   errorMessage: document.getElementById('error-message') as HTMLElement,
   errorRetryBtn: document.getElementById('error-retry-btn') as HTMLButtonElement,
+  cancelBtn: document.getElementById('cancel-btn') as HTMLButtonElement,
 };
 
 let currentVideoInfo: VideoInfo | null = null;
@@ -206,10 +207,12 @@ function applyJobState(job: Job): void {
     setLoading(true);
     setJobStatus('In progress...');
     elements.promptSelect.disabled = true;
+    elements.cancelBtn.classList.remove('hidden');
     return;
   }
 
   elements.promptSelect.disabled = false;
+  elements.cancelBtn.classList.add('hidden');
 
   if (job.status === 'SUCCEEDED') {
     setLoading(false);
@@ -422,6 +425,23 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+async function cancelJob(): Promise<void> {
+  if (!currentJobId) return;
+  elements.cancelBtn.disabled = true;
+  try {
+    await sendMessage('CANCEL_JOB', { jobId: currentJobId });
+    setLoading(false);
+    setJobStatus('Canceled');
+    elements.cancelBtn.classList.add('hidden');
+    elements.promptSelect.disabled = false;
+  } finally {
+    elements.cancelBtn.disabled = false;
+  }
+}
+
+elements.cancelBtn.addEventListener('click', () => {
+  void cancelJob();
+});
 elements.settingsBtn.addEventListener('click', openOptions);
 if (elements.dashboardBtn) {
   elements.dashboardBtn.addEventListener('click', openDashboard);

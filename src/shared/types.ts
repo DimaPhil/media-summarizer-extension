@@ -189,7 +189,8 @@ export type MessageType =
   | 'BATCH_TRANSCRIBE'
   | 'BATCH_TRANSCRIBE_RESPONSE'
   | 'CHANNEL_UPDATED'
-  | 'BACKFILL_CHANNEL_IDS';
+  | 'BACKFILL_CHANNEL_IDS'
+  | 'CANCEL_JOB';
 
 export interface Message {
   type: MessageType;

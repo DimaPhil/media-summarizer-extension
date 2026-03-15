@@ -503,11 +503,25 @@ class JobStore {
 
   async getRunningVideoIds(videoIds: string[]): Promise<Set<string>> {
     const db = await this.openDb();
-    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
-    const index = tx.objectStore(JOB_DB.STORES.JOBS).index('byStatus');
-    const runningJobs = (await requestToPromise(index.getAll('RUNNING'))) as Job[];
-    const runningSet = new Set(runningJobs.map((j) => j.videoId));
-    return new Set(videoIds.filter((id) => runningSet.has(id)));
+    const tx = db.transaction([JOB_DB.STORES.JOBS, JOB_DB.STORES.ACTIVE_BY_VIDEO_KEY], 'readonly');
+    const jobsStore = tx.objectStore(JOB_DB.STORES.JOBS);
+    const activeStore = tx.objectStore(JOB_DB.STORES.ACTIVE_BY_VIDEO_KEY);
+    const runningIds = new Set<string>();
+
+    for (const videoId of videoIds) {
+      const videoKey = `youtube:${videoId}`;
+      const activeRecord = (await requestToPromise(activeStore.get(videoKey))) as
+        | ActiveJobRecord
+        | undefined;
+      if (activeRecord) {
+        const job = (await requestToPromise(jobsStore.get(activeRecord.jobId))) as Job | undefined;
+        if (job && job.status === 'RUNNING') {
+          runningIds.add(videoId);
+        }
+      }
+    }
+
+    return runningIds;
   }
 
   async getSucceededVideoIds(videoIds: string[]): Promise<Set<string>> {
@@ -517,6 +531,15 @@ class JobStore {
     const succeededJobs = (await requestToPromise(index.getAll('SUCCEEDED'))) as Job[];
     const succeededSet = new Set(succeededJobs.map((j) => j.videoId));
     return new Set(videoIds.filter((id) => succeededSet.has(id)));
+  }
+
+  async getFailedVideoIds(videoIds: string[]): Promise<Set<string>> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
+    const index = tx.objectStore(JOB_DB.STORES.JOBS).index('byStatus');
+    const failedJobs = (await requestToPromise(index.getAll('FAILED'))) as Job[];
+    const failedSet = new Set(failedJobs.map((j) => j.videoId));
+    return new Set(videoIds.filter((id) => failedSet.has(id)));
   }
 
   async backfillChannelIdOnJobs(

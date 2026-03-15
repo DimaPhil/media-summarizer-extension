@@ -31,6 +31,8 @@ const DEFAULT_CHUNK_OVERLAP_SEC = 8;
 const RUNNING_HEARTBEAT_MS = 10 * 1000;
 const STALE_JOB_THRESHOLD_MS = 45 * 1000;
 
+const runningControllers = new Map<string, AbortController>();
+
 let initPromise: Promise<void> | null = null;
 
 function notifyChannelUpdated(channelId: string): void {
@@ -155,19 +157,38 @@ function mergeSegmentOutputsFallback(segmentOutputs: string[]): string {
   return merged;
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage: string,
+  signal?: AbortSignal
+): Promise<T> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+
     const timer = setTimeout(() => {
       reject(new SummarizationError(ErrorCode.TIMEOUT, errorMessage));
     }, timeoutMs);
 
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     promise
       .then((result) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         resolve(result);
       })
       .catch((error) => {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
         reject(error);
       });
   });
@@ -250,7 +271,8 @@ async function runSingleRequest(
   promptText: string,
   client: GeminiClient,
   timeoutMs: number,
-  streamResponse: boolean
+  streamResponse: boolean,
+  signal?: AbortSignal
 ): Promise<string> {
   if (streamResponse) {
     const runStreaming = async (): Promise<string> => {
@@ -258,6 +280,7 @@ async function runSingleRequest(
       const stream = client.summarizeYouTubeVideoStream(request.videoInfo, promptText);
 
       for await (const chunk of stream) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         fullText += chunk;
         await jobStore.appendJobOutput(job.jobId, chunk);
         notifyJobUpdated(job.jobId);
@@ -283,14 +306,18 @@ async function runSingleRequest(
     return withTimeout(
       runStreaming(),
       timeoutMs,
-      `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`
+      `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
+      signal
     );
   }
+
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
   const fullText = await withTimeout(
     client.summarizeYouTubeVideo(request.videoInfo, promptText),
     timeoutMs,
-    `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`
+    `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
+    signal
   );
 
   await jobStore.updateJob(job.jobId, { outputText: fullText });
@@ -304,7 +331,8 @@ async function runChunkedRequest(
   promptText: string,
   client: GeminiClient,
   durationSec: number,
-  timeoutMs: number
+  timeoutMs: number,
+  signal?: AbortSignal
 ): Promise<{ outputText: string; segments: Job['segments']; mergeOutputText?: string }> {
   const segments = createSegments(
     durationSec,
@@ -326,6 +354,8 @@ async function runChunkedRequest(
   notifyJobUpdated(job.jobId);
 
   for (const segment of segments) {
+    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
     const summarizeSegment = async () => {
       let segmentText = '';
       const stream = client.summarizeYouTubeVideoStream(request.videoInfo, promptText, {
@@ -334,6 +364,7 @@ async function runChunkedRequest(
       });
 
       for await (const chunk of stream) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
         segmentText += chunk;
         await jobStore.appendJobOutput(job.jobId, chunk, {
           index: segment.index,
@@ -349,7 +380,8 @@ async function runChunkedRequest(
     const outputText = await withTimeout(
       summarizeSegment(),
       timeoutMs,
-      `Segment summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`
+      `Segment summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
+      signal
     );
 
     completedSegments.push({
@@ -362,13 +394,16 @@ async function runChunkedRequest(
     notifyJobUpdated(job.jobId);
   }
 
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
   let mergeOutputText = '';
 
   try {
     mergeOutputText = await withTimeout(
       client.mergeSegmentOutputs(promptText, completedSegments),
       timeoutMs,
-      `Merge step timed out after ${Math.round(timeoutMs / 60000)} minutes`
+      `Merge step timed out after ${Math.round(timeoutMs / 60000)} minutes`,
+      signal
     );
   } catch {
     mergeOutputText = mergeSegmentOutputsFallback(
@@ -393,6 +428,10 @@ async function runJob(
   if (!initialJob || initialJob.status !== 'RUNNING') {
     return;
   }
+
+  const controller = new AbortController();
+  runningControllers.set(jobId, controller);
+  const { signal } = controller;
 
   const stopHeartbeat = startRunningHeartbeat(jobId);
   const timeoutMs = (settings.summarizationTimeoutMinutes || 5) * 60 * 1000;
@@ -420,7 +459,8 @@ async function runJob(
         prompt.prompt,
         client,
         durationSec,
-        timeoutMs
+        timeoutMs,
+        signal
       );
       outputText = chunked.outputText;
       segments = chunked.segments;
@@ -433,9 +473,11 @@ async function runJob(
           prompt.prompt,
           client,
           timeoutMs,
-          settings.streamResponse
+          settings.streamResponse,
+          signal
         );
       } catch (error) {
+        if (signal.aborted) throw error;
         if (durationSec && isDurationOrContextError(error)) {
           const chunked = await runChunkedRequest(
             initialJob,
@@ -443,7 +485,8 @@ async function runJob(
             prompt.prompt,
             client,
             durationSec,
-            timeoutMs
+            timeoutMs,
+            signal
           );
           outputText = chunked.outputText;
           segments = chunked.segments;
@@ -490,6 +533,12 @@ async function runJob(
       })
       .catch(() => {});
   } catch (error) {
+    if (signal.aborted) {
+      const canceledJob = await jobStore.completeJob(jobId, { status: 'CANCELED' });
+      if (canceledJob) notifyJobUpdated(canceledJob.jobId);
+      return;
+    }
+
     const summError =
       error instanceof SummarizationError
         ? error
@@ -516,6 +565,7 @@ async function runJob(
       })
       .catch(() => {});
   } finally {
+    runningControllers.delete(jobId);
     stopHeartbeat();
   }
 }
@@ -955,11 +1005,13 @@ chrome.runtime.onMessage.addListener(
             const videoIds = videos.map((v) => v.videoId);
             const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
             const runningIds = await jobStore.getRunningVideoIds(videoIds);
+            const failedIds = await jobStore.getFailedVideoIds(videoIds);
 
             const annotated = videos.map((v) => ({
               ...v,
               hasTranscription: succeededIds.has(v.videoId),
               isRunning: runningIds.has(v.videoId),
+              isFailed: failedIds.has(v.videoId) && !succeededIds.has(v.videoId),
               isNew:
                 v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId),
             }));
@@ -970,22 +1022,29 @@ chrome.runtime.onMessage.addListener(
           const channelJobs = await jobStore.listJobsByChannel(channelId);
           const videoMap = new Map<
             string,
-            { job: Job; hasTranscription: boolean; isRunning: boolean }
+            { job: Job; hasTranscription: boolean; isRunning: boolean; isFailed: boolean }
           >();
           for (const job of channelJobs) {
             const existing = videoMap.get(job.videoId);
             const succeeded = job.status === 'SUCCEEDED';
             const running = job.status === 'RUNNING';
+            const failed = job.status === 'FAILED';
             if (!existing) {
-              videoMap.set(job.videoId, { job, hasTranscription: succeeded, isRunning: running });
+              videoMap.set(job.videoId, {
+                job,
+                hasTranscription: succeeded,
+                isRunning: running,
+                isFailed: failed,
+              });
             } else {
               if (succeeded) existing.hasTranscription = true;
               if (running) existing.isRunning = true;
+              if (failed) existing.isFailed = true;
             }
           }
 
           const annotated = Array.from(videoMap.values()).map(
-            ({ job, hasTranscription, isRunning }) => ({
+            ({ job, hasTranscription, isRunning, isFailed }) => ({
               videoId: job.videoId,
               channelId: job.channelId || channelId,
               title: job.videoTitle,
@@ -996,6 +1055,7 @@ chrome.runtime.onMessage.addListener(
               discoveredAt: job.createdAt,
               hasTranscription,
               isRunning: isRunning && !hasTranscription,
+              isFailed: isFailed && !hasTranscription,
               isNew: false,
             })
           );
@@ -1054,6 +1114,22 @@ chrome.runtime.onMessage.addListener(
           }
 
           return { type: 'BATCH_TRANSCRIBE_RESPONSE', payload: results };
+        }
+
+        case 'CANCEL_JOB': {
+          const { jobId } = message.payload as { jobId: string };
+          const controller = runningControllers.get(jobId);
+          if (controller) {
+            controller.abort();
+          } else {
+            // Job already finished or controller gone — mark CANCELED as fallback
+            const job = await jobStore.getJob(jobId);
+            if (job && job.status === 'RUNNING') {
+              await jobStore.completeJob(jobId, { status: 'CANCELED' });
+              notifyJobUpdated(jobId);
+            }
+          }
+          return { type: 'JOB_RESPONSE', payload: { canceled: true } };
         }
 
         case 'BACKFILL_CHANNEL_IDS': {
