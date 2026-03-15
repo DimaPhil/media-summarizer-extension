@@ -54,7 +54,7 @@ async function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
         return;
       }
 
-      resolve(response?.payload ?? response);
+      resolve(response && 'payload' in response ? response.payload : response);
     });
   });
 }

@@ -10,58 +10,115 @@
   <div class="page">
     <header class="header">
       <div>
-        <h1>Jobs Dashboard</h1>
+        <h1>Media Summarizer</h1>
         <p>Live status, history, prompt snapshots, and manual edits.</p>
       </div>
       <button id="clear-all-btn" class="btn btn-secondary" type="button">Clear History</button>
     </header>
 
-    <main class="grid">
-      <section class="panel">
-        <div class="panel-header">
-          <div class="panel-title">All Jobs</div>
-        </div>
-        <div id="jobs-list" class="jobs-list"></div>
-        <div id="empty-state" class="empty-state hidden">No jobs yet. Run a summary from the popup to populate history.</div>
-      </section>
+    <nav class="tab-bar">
+      <button class="tab-btn active" data-tab="jobs" type="button">Jobs</button>
+      <button class="tab-btn" data-tab="channels" type="button">Channels</button>
+    </nav>
 
-      <section class="panel detail">
-        <div id="detail-placeholder" class="detail-placeholder">Select a job to inspect details.</div>
-
-        <div id="detail-panel" class="hidden">
-          <div class="detail-header">
-            <h2 id="detail-title" class="detail-title"></h2>
-            <span id="detail-status" class="status-badge"></span>
+    <!-- Jobs Tab -->
+    <div id="tab-jobs" class="tab-content">
+      <main class="grid">
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">All Jobs</div>
           </div>
+          <div id="jobs-list" class="jobs-list"></div>
+          <div id="empty-state" class="empty-state hidden">No jobs yet. Run a summary from the popup to populate history.</div>
+        </section>
 
-          <div id="detail-meta" class="detail-meta"></div>
-          <a id="detail-link" class="detail-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+        <section class="panel detail">
+          <div id="detail-placeholder" class="detail-placeholder">Select a job to inspect details.</div>
 
-          <div class="block">
-            <h3>Output</h3>
-            <div id="output-rendered" class="output-rendered"></div>
-            <pre id="output-raw" class="output-raw"></pre>
-          </div>
-
-          <div class="block">
-            <div class="actions" style="margin-bottom: 8px;">
-              <button id="view-prompt-btn" class="btn btn-secondary" type="button">View Prompt Used</button>
+          <div id="detail-panel" class="hidden">
+            <div class="detail-header">
+              <h2 id="detail-title" class="detail-title"></h2>
+              <span id="detail-status" class="status-badge"></span>
             </div>
-            <pre id="prompt-snapshot" class="prompt-snapshot hidden"></pre>
-          </div>
 
-          <div class="block">
-            <h3>Manual Edit</h3>
-            <textarea id="edited-text" class="edited-text" placeholder="Edit generated transcription here..."></textarea>
-            <div class="actions" style="margin-top: 8px;">
-              <button id="save-edit-btn" class="btn btn-primary" type="button">Save Edit</button>
-              <button id="restart-btn" class="btn btn-secondary" type="button">Restart Job</button>
-              <button id="delete-btn" class="btn btn-secondary" type="button">Delete Job</button>
+            <div id="detail-meta" class="detail-meta"></div>
+            <a id="detail-link" class="detail-link" href="#" target="_blank" rel="noopener noreferrer"></a>
+
+            <div class="block">
+              <h3>Output</h3>
+              <div id="output-rendered" class="output-rendered"></div>
+              <pre id="output-raw" class="output-raw"></pre>
+            </div>
+
+            <div class="block">
+              <div class="actions" style="margin-bottom: 8px;">
+                <button id="view-prompt-btn" class="btn btn-secondary" type="button">View Prompt Used</button>
+              </div>
+              <pre id="prompt-snapshot" class="prompt-snapshot hidden"></pre>
+            </div>
+
+            <div class="block">
+              <h3>Manual Edit</h3>
+              <textarea id="edited-text" class="edited-text" placeholder="Edit generated transcription here..."></textarea>
+              <div class="actions" style="margin-top: 8px;">
+                <button id="save-edit-btn" class="btn btn-primary" type="button">Save Edit</button>
+                <button id="restart-btn" class="btn btn-secondary" type="button">Restart Job</button>
+                <button id="delete-btn" class="btn btn-secondary" type="button">Delete Job</button>
+              </div>
             </div>
           </div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Channels Tab -->
+    <div id="tab-channels" class="tab-content hidden">
+      <div class="channels-toolbar">
+        <button id="add-channel-btn" class="btn btn-primary" type="button">Add Channel</button>
+      </div>
+
+      <!-- Channels List View -->
+      <div id="channels-list-view">
+        <div id="channels-list" class="channels-list"></div>
+        <div id="channels-empty" class="empty-state hidden">No channels tracked yet. Click "Add Channel" to get started.</div>
+      </div>
+
+      <!-- Channel Detail View -->
+      <div id="channel-detail-view" class="hidden">
+        <div class="channel-detail-header">
+          <button id="channel-back-btn" class="btn btn-secondary" type="button">&larr; Back</button>
+          <div class="channel-detail-info">
+            <img id="channel-detail-avatar" class="channel-avatar-lg" src="" alt="">
+            <div>
+              <h2 id="channel-detail-title"></h2>
+              <span id="channel-detail-stats" class="text-soft"></span>
+            </div>
+          </div>
+          <div class="channel-detail-actions">
+            <select id="batch-prompt-select" class="prompt-select"></select>
+            <button id="batch-transcribe-btn" class="btn btn-primary" type="button">Transcribe All New</button>
+            <button id="refresh-videos-btn" class="btn btn-secondary" type="button">Refresh Videos</button>
+            <button id="remove-channel-btn" class="btn btn-secondary btn-danger-text" type="button">Remove</button>
+            <button id="subscribe-channel-btn" class="btn btn-primary hidden" type="button">Subscribe</button>
+          </div>
         </div>
-      </section>
-    </main>
+        <div id="channel-videos-list" class="channel-videos-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Add Channel Modal -->
+  <div id="add-channel-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Add Channel</h3>
+      <p class="text-soft">Enter a YouTube video URL or channel ID (UC...)</p>
+      <input id="channel-input" class="modal-input" type="text" placeholder="https://youtube.com/watch?v=... or UC...">
+      <div id="channel-input-error" class="modal-error hidden"></div>
+      <div class="modal-actions">
+        <button id="modal-cancel-btn" class="btn btn-secondary" type="button">Cancel</button>
+        <button id="modal-add-btn" class="btn btn-primary" type="button">Add</button>
+      </div>
+    </div>
   </div>
 
   <div id="toast" class="toast hidden"><span id="toast-message"></span></div>

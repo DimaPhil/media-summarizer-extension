@@ -65,16 +65,21 @@ export const STORAGE_KEYS = {
 
 export const JOB_DB = {
   NAME: 'media_summarizer',
-  VERSION: 1,
+  VERSION: 2,
   STORES: {
     JOBS: 'jobs',
     ACTIVE_BY_VIDEO_KEY: 'activeByVideoKey',
     META: 'meta',
+    CHANNELS: 'channels',
+    CHANNEL_VIDEOS: 'channelVideos',
   },
   META_KEYS: {
     CACHE_MIGRATED: 'cacheMigratedToJobs',
   },
 } as const;
+
+export const NEW_VIDEO_CUTOFF_MS = Date.UTC(2026, 2, 14);
+export const CHANNEL_FETCH_MAX_RESULTS = 50;
 
 export const PLATFORM_PATTERNS: Record<string, RegExp[]> = {
   youtube: [

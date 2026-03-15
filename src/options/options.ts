@@ -10,6 +10,8 @@ const elements = {
   geminiTestResult: document.getElementById('gemini-test-result') as HTMLElement,
   youtubeApiKey: document.getElementById('youtube-api-key') as HTMLInputElement,
   toggleYoutubeKey: document.getElementById('toggle-youtube-key') as HTMLButtonElement,
+  testYoutubeKey: document.getElementById('test-youtube-key') as HTMLButtonElement,
+  youtubeTestResult: document.getElementById('youtube-test-result') as HTMLElement,
   geminiModel: document.getElementById('gemini-model') as HTMLSelectElement,
   defaultPrompt: document.getElementById('default-prompt') as HTMLSelectElement,
   autoDetectCategory: document.getElementById('auto-detect-category') as HTMLInputElement,
@@ -37,7 +39,7 @@ let editingPromptId: string | null = null;
 async function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage({ type, payload }, (response) => {
-      resolve(response?.payload ?? response);
+      resolve(response && 'payload' in response ? response.payload : response);
     });
   });
 }
@@ -249,6 +251,43 @@ async function testApiKey(): Promise<void> {
   }
 }
 
+async function testYoutubeApiKey(): Promise<void> {
+  const apiKey = elements.youtubeApiKey.value.trim();
+  if (!apiKey) {
+    showToast('Please enter a YouTube API key first');
+    return;
+  }
+
+  elements.testYoutubeKey.disabled = true;
+  elements.testYoutubeKey.textContent = 'Testing...';
+  elements.youtubeTestResult.classList.add('hidden');
+
+  try {
+    const url = `https://www.googleapis.com/youtube/v3/videoCategories?part=snippet&regionCode=US&maxResults=1&key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(url);
+
+    elements.youtubeTestResult.classList.remove('hidden', 'success', 'error');
+    if (response.ok) {
+      elements.youtubeTestResult.classList.add('success');
+      elements.youtubeTestResult.textContent = 'YouTube API key is valid!';
+    } else if (response.status === 400 || response.status === 403) {
+      elements.youtubeTestResult.classList.add('error');
+      elements.youtubeTestResult.textContent =
+        'Invalid API key or YouTube Data API v3 not enabled.';
+    } else {
+      elements.youtubeTestResult.classList.add('error');
+      elements.youtubeTestResult.textContent = `API request failed (HTTP ${response.status}).`;
+    }
+  } catch {
+    elements.youtubeTestResult.classList.remove('hidden', 'success');
+    elements.youtubeTestResult.classList.add('error');
+    elements.youtubeTestResult.textContent = 'Failed to test YouTube API key.';
+  } finally {
+    elements.testYoutubeKey.disabled = false;
+    elements.testYoutubeKey.textContent = 'Test';
+  }
+}
+
 async function saveAllSettings(): Promise<void> {
   const settings = getSettingsFromForm();
 
@@ -301,6 +340,7 @@ elements.toggleYoutubeKey.addEventListener('click', () =>
   togglePasswordVisibility(elements.youtubeApiKey)
 );
 elements.testGeminiKey.addEventListener('click', testApiKey);
+elements.testYoutubeKey.addEventListener('click', testYoutubeApiKey);
 elements.addPrompt.addEventListener('click', openAddModal);
 elements.closeModal.addEventListener('click', closeModalHandler);
 elements.cancelPrompt.addEventListener('click', closeModalHandler);

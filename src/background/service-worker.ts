@@ -13,8 +13,17 @@ import type {
 import { ErrorCode, SummarizationError, ERROR_MESSAGES } from '../shared/errors';
 import { storage } from './storage';
 import { GeminiClient, resetGeminiClient } from './gemini-client';
-import { fetchVideoCategory } from './youtube-api';
+import {
+  fetchVideoDetails,
+  fetchVideoDetailsBatch,
+  fetchChannelDetails,
+  fetchChannelVideos,
+  fetchVideoDurations,
+  fetchChannelThumbnails,
+} from './youtube-api';
 import { getVideoKey, jobStore } from './job-store';
+import { NEW_VIDEO_CUTOFF_MS } from '../shared/constants';
+import type { Channel, ChannelVideo } from '../shared/types';
 
 const MAX_SINGLE_REQUEST_VIDEO_SEC = 55 * 60;
 const DEFAULT_CHUNK_DURATION_SEC = 12 * 60;
@@ -23,6 +32,15 @@ const RUNNING_HEARTBEAT_MS = 10 * 1000;
 const STALE_JOB_THRESHOLD_MS = 45 * 1000;
 
 let initPromise: Promise<void> | null = null;
+
+function notifyChannelUpdated(channelId: string): void {
+  chrome.runtime
+    .sendMessage({
+      type: 'CHANNEL_UPDATED',
+      payload: { channelId },
+    })
+    .catch(() => {});
+}
 
 function notifyJobUpdated(jobId: string): void {
   chrome.runtime
@@ -559,6 +577,8 @@ async function startJob(request: StartJobRequest): Promise<SummarizationResult> 
         : undefined,
     categoryId: videoInfo.categoryId,
     categoryName: videoInfo.categoryName,
+    channelId: videoInfo.channelId,
+    channelTitle: videoInfo.channelTitle,
     promptId: prompt.id,
     promptName: prompt.name,
     promptTextSnapshot: prompt.prompt,
@@ -628,14 +648,16 @@ chrome.runtime.onMessage.addListener(
             if (videoInfo && videoInfo.platform === 'youtube') {
               const settings = await storage.getSettings();
               if (settings.youtubeApiKey) {
-                const categoryData = await fetchVideoCategory(
-                  videoInfo.videoId,
-                  settings.youtubeApiKey
-                );
-                if (categoryData) {
-                  videoInfo.categoryId = categoryData.categoryId;
-                  videoInfo.categoryName = categoryData.categoryName;
-                  videoInfo.title = categoryData.title || videoInfo.title;
+                const details = await fetchVideoDetails(videoInfo.videoId, settings.youtubeApiKey);
+                if (details) {
+                  videoInfo.categoryId = details.categoryId;
+                  videoInfo.categoryName = details.categoryName;
+                  videoInfo.title = details.title || videoInfo.title;
+                  videoInfo.channelId = details.channelId;
+                  videoInfo.channelTitle = details.channelTitle;
+                  if (details.duration) {
+                    videoInfo.duration = details.duration;
+                  }
                 }
               }
             }
@@ -754,6 +776,315 @@ chrome.runtime.onMessage.addListener(
         case 'CLEAR_ALL_JOBS': {
           await jobStore.clearAllJobs();
           return { type: 'JOB_RESPONSE', payload: { success: true } };
+        }
+
+        case 'ADD_CHANNEL': {
+          const payload = message.payload as { videoId?: string; channelId?: string };
+          const settings = await storage.getSettings();
+          if (!settings.youtubeApiKey) {
+            return { error: 'YouTube API key not configured' };
+          }
+
+          let channelId = payload.channelId;
+
+          // If we have a videoId, look up its channel
+          if (!channelId && payload.videoId) {
+            const details = await fetchVideoDetails(payload.videoId, settings.youtubeApiKey);
+            if (!details) {
+              return { error: 'Could not find video details' };
+            }
+            channelId = details.channelId;
+          }
+
+          if (!channelId) {
+            return { error: 'No channel ID provided or resolved' };
+          }
+
+          // Check if already added
+          const existing = await jobStore.getChannel(channelId);
+          if (existing) {
+            return { type: 'CHANNEL_UPDATED', payload: existing };
+          }
+
+          // Fetch channel details from API
+          const channelDetails = await fetchChannelDetails(channelId, settings.youtubeApiKey);
+          if (!channelDetails) {
+            return { error: 'Could not fetch channel details' };
+          }
+
+          const channel: Channel = {
+            channelId: channelDetails.channelId,
+            title: channelDetails.title,
+            thumbnailUrl: channelDetails.thumbnailUrl,
+            uploadsPlaylistId: channelDetails.uploadsPlaylistId,
+            addedAt: Date.now(),
+          };
+
+          await jobStore.addChannel(channel);
+
+          // Fetch initial videos
+          const playlistVideos = await fetchChannelVideos(
+            channel.uploadsPlaylistId,
+            settings.youtubeApiKey
+          );
+
+          const videoIds = playlistVideos.map((v) => v.videoId);
+          const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
+
+          const now = Date.now();
+          const channelVideos: ChannelVideo[] = playlistVideos.map((v) => ({
+            videoId: v.videoId,
+            channelId: channel.channelId,
+            title: v.title,
+            thumbnailUrl: v.thumbnailUrl,
+            publishedAt: new Date(v.publishedAt).getTime(),
+            duration: durations[v.videoId],
+            ignored: false,
+            discoveredAt: now,
+          }));
+
+          await jobStore.upsertChannelVideos(channelVideos);
+          await jobStore.updateChannel(channel.channelId, { lastFetchedAt: now });
+
+          // Backfill channelId on existing jobs
+          await jobStore.backfillChannelIdOnJobs(channel.channelId, channel.title, videoIds);
+
+          notifyChannelUpdated(channel.channelId);
+          return { type: 'CHANNEL_UPDATED', payload: channel };
+        }
+
+        case 'REMOVE_CHANNEL': {
+          const { channelId } = message.payload as { channelId: string };
+          await jobStore.removeChannel(channelId);
+          return { type: 'CHANNEL_UPDATED', payload: { removed: true, channelId } };
+        }
+
+        case 'LIST_CHANNELS': {
+          const channels = await jobStore.listChannels();
+          const channelsWithCounts = await Promise.all(
+            channels.map(async (ch) => {
+              const videos = await jobStore.listChannelVideos(ch.channelId);
+              const videoIds = videos.map((v) => v.videoId);
+              const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+              const newCount = videos.filter(
+                (v) =>
+                  v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId)
+              ).length;
+              return {
+                ...ch,
+                subscribed: true,
+                newCount,
+                totalCount: videos.length,
+              };
+            })
+          );
+
+          // Merge discovered channels from existing jobs
+          const discovered = await jobStore.getDiscoveredChannels();
+          if (discovered.size > 0) {
+            // Batch-fetch thumbnails for discovered channels
+            const settings = await storage.getSettings();
+            const discoveredIds = [...discovered.keys()];
+            const thumbs = settings.youtubeApiKey
+              ? await fetchChannelThumbnails(discoveredIds, settings.youtubeApiKey)
+              : new Map<string, string>();
+
+            for (const [, entry] of discovered) {
+              channelsWithCounts.push({
+                channelId: entry.channelId,
+                title: entry.channelTitle,
+                thumbnailUrl: thumbs.get(entry.channelId),
+                uploadsPlaylistId: '',
+                addedAt: 0,
+                subscribed: false,
+                newCount: 0,
+                totalCount: entry.videoIds.size,
+              });
+            }
+          }
+
+          return { type: 'LIST_CHANNELS_RESPONSE', payload: channelsWithCounts };
+        }
+
+        case 'FETCH_CHANNEL_VIDEOS': {
+          const { channelId } = message.payload as { channelId: string };
+          const channel = await jobStore.getChannel(channelId);
+          if (!channel) {
+            return { error: 'Channel not found' };
+          }
+
+          const settings = await storage.getSettings();
+          if (!settings.youtubeApiKey) {
+            return { error: 'YouTube API key not configured' };
+          }
+
+          const playlistVideos = await fetchChannelVideos(
+            channel.uploadsPlaylistId,
+            settings.youtubeApiKey
+          );
+
+          const videoIds = playlistVideos.map((v) => v.videoId);
+          const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
+
+          const now = Date.now();
+          const channelVideos: ChannelVideo[] = playlistVideos.map((v) => ({
+            videoId: v.videoId,
+            channelId: channel.channelId,
+            title: v.title,
+            thumbnailUrl: v.thumbnailUrl,
+            publishedAt: new Date(v.publishedAt).getTime(),
+            duration: durations[v.videoId],
+            ignored: false,
+            discoveredAt: now,
+          }));
+
+          await jobStore.upsertChannelVideos(channelVideos);
+          await jobStore.updateChannel(channelId, { lastFetchedAt: now });
+          notifyChannelUpdated(channelId);
+
+          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: { success: true } };
+        }
+
+        case 'LIST_CHANNEL_VIDEOS': {
+          const { channelId } = message.payload as { channelId: string };
+          const channel = await jobStore.getChannel(channelId);
+
+          if (channel) {
+            // Subscribed channel — use channelVideos store
+            const videos = await jobStore.listChannelVideos(channelId);
+            const videoIds = videos.map((v) => v.videoId);
+            const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+            const runningIds = await jobStore.getRunningVideoIds(videoIds);
+
+            const annotated = videos.map((v) => ({
+              ...v,
+              hasTranscription: succeededIds.has(v.videoId),
+              isRunning: runningIds.has(v.videoId),
+              isNew:
+                v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId),
+            }));
+            return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
+          }
+
+          // Discovered channel — build video list from jobs
+          const channelJobs = await jobStore.listJobsByChannel(channelId);
+          const videoMap = new Map<
+            string,
+            { job: Job; hasTranscription: boolean; isRunning: boolean }
+          >();
+          for (const job of channelJobs) {
+            const existing = videoMap.get(job.videoId);
+            const succeeded = job.status === 'SUCCEEDED';
+            const running = job.status === 'RUNNING';
+            if (!existing) {
+              videoMap.set(job.videoId, { job, hasTranscription: succeeded, isRunning: running });
+            } else {
+              if (succeeded) existing.hasTranscription = true;
+              if (running) existing.isRunning = true;
+            }
+          }
+
+          const annotated = Array.from(videoMap.values()).map(
+            ({ job, hasTranscription, isRunning }) => ({
+              videoId: job.videoId,
+              channelId: job.channelId || channelId,
+              title: job.videoTitle,
+              thumbnailUrl: job.thumbnailUrl,
+              publishedAt: job.createdAt,
+              duration: undefined as string | undefined,
+              ignored: false,
+              discoveredAt: job.createdAt,
+              hasTranscription,
+              isRunning: isRunning && !hasTranscription,
+              isNew: false,
+            })
+          );
+
+          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
+        }
+
+        case 'IGNORE_VIDEO': {
+          const { videoId, ignored } = message.payload as { videoId: string; ignored: boolean };
+          const updated = await jobStore.setVideoIgnored(videoId, ignored);
+          if (updated) {
+            notifyChannelUpdated(updated.channelId);
+          }
+          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: updated };
+        }
+
+        case 'BATCH_TRANSCRIBE': {
+          const { channelId, promptId } = message.payload as {
+            channelId: string;
+            promptId: string;
+          };
+          const videos = await jobStore.listChannelVideos(channelId);
+          const videoIds = videos.map((v) => v.videoId);
+          const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+          const channel = await jobStore.getChannel(channelId);
+
+          const newVideos = videos.filter(
+            (v) =>
+              v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId)
+          );
+
+          const results: Array<{ videoId: string; jobId?: string; error?: string }> = [];
+
+          for (const video of newVideos) {
+            const videoInfo: VideoInfo = {
+              url: `https://www.youtube.com/watch?v=${video.videoId}`,
+              videoId: video.videoId,
+              platform: 'youtube',
+              title: video.title,
+              duration: video.duration,
+              channelId: video.channelId,
+              channelTitle: channel?.title,
+            };
+
+            const result = await startJob({
+              videoInfo,
+              promptId,
+              forceRegenerate: false,
+            });
+
+            results.push({
+              videoId: video.videoId,
+              jobId: result.jobId,
+              error: result.error,
+            });
+          }
+
+          return { type: 'BATCH_TRANSCRIBE_RESPONSE', payload: results };
+        }
+
+        case 'BACKFILL_CHANNEL_IDS': {
+          const settings = await storage.getSettings();
+          if (!settings.youtubeApiKey) {
+            return { error: 'YouTube API key not configured' };
+          }
+
+          const jobsMissing = await jobStore.getJobsMissingChannelId();
+          if (jobsMissing.length === 0) {
+            return { type: 'CHANNEL_UPDATED', payload: { backfilled: 0 } };
+          }
+
+          // Deduplicate videoIds
+          const uniqueVideoIds = [...new Set(jobsMissing.map((j) => j.videoId))];
+          const detailsMap = await fetchVideoDetailsBatch(uniqueVideoIds, settings.youtubeApiKey);
+
+          const updates: Array<{ jobId: string; channelId: string; channelTitle: string }> = [];
+          for (const job of jobsMissing) {
+            const details = detailsMap.get(job.videoId);
+            if (details?.channelId) {
+              updates.push({
+                jobId: job.jobId,
+                channelId: details.channelId,
+                channelTitle: details.channelTitle,
+              });
+            }
+          }
+
+          await jobStore.bulkUpdateChannelIds(updates);
+          return { type: 'CHANNEL_UPDATED', payload: { backfilled: updates.length } };
         }
 
         default:

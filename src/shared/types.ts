@@ -30,6 +30,28 @@ export interface VideoInfo {
   duration?: string;
   categoryId?: string;
   categoryName?: string;
+  channelId?: string;
+  channelTitle?: string;
+}
+
+export interface Channel {
+  channelId: string;
+  title: string;
+  thumbnailUrl?: string;
+  uploadsPlaylistId: string;
+  addedAt: number;
+  lastFetchedAt?: number;
+}
+
+export interface ChannelVideo {
+  videoId: string;
+  channelId: string;
+  title: string;
+  thumbnailUrl?: string;
+  publishedAt: number;
+  duration?: string;
+  ignored: boolean;
+  discoveredAt: number;
 }
 
 export type Platform = 'youtube' | 'vimeo' | 'unknown';
@@ -95,6 +117,8 @@ export interface Job {
   thumbnailUrl?: string;
   categoryId?: string;
   categoryName?: string;
+  channelId?: string;
+  channelTitle?: string;
   promptId: string;
   promptName: string;
   promptTextSnapshot: string;
@@ -153,7 +177,19 @@ export type MessageType =
   | 'LIST_JOBS_RESPONSE'
   | 'UPDATE_JOB_EDITED_TEXT'
   | 'DELETE_JOB'
-  | 'CLEAR_ALL_JOBS';
+  | 'CLEAR_ALL_JOBS'
+  | 'ADD_CHANNEL'
+  | 'REMOVE_CHANNEL'
+  | 'LIST_CHANNELS'
+  | 'LIST_CHANNELS_RESPONSE'
+  | 'FETCH_CHANNEL_VIDEOS'
+  | 'CHANNEL_VIDEOS_RESPONSE'
+  | 'LIST_CHANNEL_VIDEOS'
+  | 'IGNORE_VIDEO'
+  | 'BATCH_TRANSCRIBE'
+  | 'BATCH_TRANSCRIBE_RESPONSE'
+  | 'CHANNEL_UPDATED'
+  | 'BACKFILL_CHANNEL_IDS';
 
 export interface Message {
   type: MessageType;

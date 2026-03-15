@@ -1,6 +1,8 @@
 import { JOB_DB } from '../shared/constants';
 import type {
   CachedSummary,
+  Channel,
+  ChannelVideo,
   Job,
   JobListQuery,
   JobSegment,
@@ -68,23 +70,38 @@ class JobStore {
     this.dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(JOB_DB.NAME, JOB_DB.VERSION);
 
-      request.onupgradeneeded = () => {
+      request.onupgradeneeded = (event) => {
         const db = request.result;
+        const oldVersion = (event as IDBVersionChangeEvent).oldVersion;
 
-        if (!db.objectStoreNames.contains(JOB_DB.STORES.JOBS)) {
+        if (oldVersion < 1) {
           const jobsStore = db.createObjectStore(JOB_DB.STORES.JOBS, { keyPath: 'jobId' });
           jobsStore.createIndex('byVideoKey', 'videoKey', { unique: false });
           jobsStore.createIndex('byStatus', 'status', { unique: false });
           jobsStore.createIndex('byCreatedAt', 'createdAt', { unique: false });
           jobsStore.createIndex('byUpdatedAt', 'updatedAt', { unique: false });
-        }
 
-        if (!db.objectStoreNames.contains(JOB_DB.STORES.ACTIVE_BY_VIDEO_KEY)) {
           db.createObjectStore(JOB_DB.STORES.ACTIVE_BY_VIDEO_KEY, { keyPath: 'videoKey' });
+          db.createObjectStore(JOB_DB.STORES.META, { keyPath: 'key' });
         }
 
-        if (!db.objectStoreNames.contains(JOB_DB.STORES.META)) {
-          db.createObjectStore(JOB_DB.STORES.META, { keyPath: 'key' });
+        if (oldVersion < 2) {
+          const channelsStore = db.createObjectStore(JOB_DB.STORES.CHANNELS, {
+            keyPath: 'channelId',
+          });
+          channelsStore.createIndex('byAddedAt', 'addedAt', { unique: false });
+
+          const channelVideosStore = db.createObjectStore(JOB_DB.STORES.CHANNEL_VIDEOS, {
+            keyPath: 'videoId',
+          });
+          channelVideosStore.createIndex('byChannelId', 'channelId', { unique: false });
+          channelVideosStore.createIndex('byPublishedAt', 'publishedAt', { unique: false });
+
+          // Add byChannelId index to existing jobs store
+          const jobsStore = request.transaction!.objectStore(JOB_DB.STORES.JOBS);
+          if (!jobsStore.indexNames.contains('byChannelId')) {
+            jobsStore.createIndex('byChannelId', 'channelId', { unique: false });
+          }
         }
       };
 
@@ -362,6 +379,219 @@ class JobStore {
       value: true,
     } satisfies MetaRecord);
     await transactionComplete(tx);
+  }
+
+  // ── Channel methods ──
+
+  async addChannel(channel: Channel): Promise<void> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNELS, 'readwrite');
+    tx.objectStore(JOB_DB.STORES.CHANNELS).put(channel);
+    await transactionComplete(tx);
+  }
+
+  async getChannel(channelId: string): Promise<Channel | null> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNELS, 'readonly');
+    const result = await requestToPromise(tx.objectStore(JOB_DB.STORES.CHANNELS).get(channelId));
+    return (result as Channel | undefined) ?? null;
+  }
+
+  async listChannels(): Promise<Channel[]> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNELS, 'readonly');
+    const all = await requestToPromise(tx.objectStore(JOB_DB.STORES.CHANNELS).getAll());
+    return (all as Channel[]).sort((a, b) => b.addedAt - a.addedAt);
+  }
+
+  async updateChannel(channelId: string, updates: Partial<Channel>): Promise<Channel | null> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNELS, 'readwrite');
+    const store = tx.objectStore(JOB_DB.STORES.CHANNELS);
+    const existing = (await requestToPromise(store.get(channelId))) as Channel | undefined;
+    if (!existing) return null;
+    const updated = { ...existing, ...updates };
+    store.put(updated);
+    await transactionComplete(tx);
+    return updated;
+  }
+
+  async removeChannel(channelId: string): Promise<void> {
+    const db = await this.openDb();
+    const tx = db.transaction([JOB_DB.STORES.CHANNELS, JOB_DB.STORES.CHANNEL_VIDEOS], 'readwrite');
+    tx.objectStore(JOB_DB.STORES.CHANNELS).delete(channelId);
+
+    // Delete all channelVideos for this channel
+    const videosStore = tx.objectStore(JOB_DB.STORES.CHANNEL_VIDEOS);
+    const index = videosStore.index('byChannelId');
+    const videos = (await requestToPromise(index.getAll(channelId))) as ChannelVideo[];
+    for (const video of videos) {
+      videosStore.delete(video.videoId);
+    }
+    await transactionComplete(tx);
+  }
+
+  // ── ChannelVideo methods ──
+
+  async upsertChannelVideos(videos: ChannelVideo[]): Promise<void> {
+    if (!videos.length) return;
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNEL_VIDEOS, 'readwrite');
+    const store = tx.objectStore(JOB_DB.STORES.CHANNEL_VIDEOS);
+
+    for (const video of videos) {
+      const existing = (await requestToPromise(store.get(video.videoId))) as
+        | ChannelVideo
+        | undefined;
+      if (existing) {
+        // Preserve the ignored flag from existing record
+        store.put({
+          ...video,
+          ignored: existing.ignored,
+          discoveredAt: existing.discoveredAt,
+        });
+      } else {
+        store.put(video);
+      }
+    }
+    await transactionComplete(tx);
+  }
+
+  async getChannelVideo(videoId: string): Promise<ChannelVideo | null> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNEL_VIDEOS, 'readonly');
+    const result = await requestToPromise(
+      tx.objectStore(JOB_DB.STORES.CHANNEL_VIDEOS).get(videoId)
+    );
+    return (result as ChannelVideo | undefined) ?? null;
+  }
+
+  async listChannelVideos(channelId: string): Promise<ChannelVideo[]> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNEL_VIDEOS, 'readonly');
+    const index = tx.objectStore(JOB_DB.STORES.CHANNEL_VIDEOS).index('byChannelId');
+    const all = await requestToPromise(index.getAll(channelId));
+    return (all as ChannelVideo[]).sort((a, b) => b.publishedAt - a.publishedAt);
+  }
+
+  async setVideoIgnored(videoId: string, ignored: boolean): Promise<ChannelVideo | null> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.CHANNEL_VIDEOS, 'readwrite');
+    const store = tx.objectStore(JOB_DB.STORES.CHANNEL_VIDEOS);
+    const existing = (await requestToPromise(store.get(videoId))) as ChannelVideo | undefined;
+    if (!existing) return null;
+    const updated = { ...existing, ignored };
+    store.put(updated);
+    await transactionComplete(tx);
+    return updated;
+  }
+
+  async listJobsByChannel(channelId: string): Promise<Job[]> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
+    const store = tx.objectStore(JOB_DB.STORES.JOBS);
+    // The byChannelId index may have undefined values for old jobs
+    if (!store.indexNames.contains('byChannelId')) {
+      // Fallback: scan all jobs
+      const all = (await requestToPromise(store.getAll())) as Job[];
+      return all.filter((j) => j.channelId === channelId).sort((a, b) => b.createdAt - a.createdAt);
+    }
+    const index = store.index('byChannelId');
+    const all = await requestToPromise(index.getAll(channelId));
+    return (all as Job[]).sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async getRunningVideoIds(videoIds: string[]): Promise<Set<string>> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
+    const index = tx.objectStore(JOB_DB.STORES.JOBS).index('byStatus');
+    const runningJobs = (await requestToPromise(index.getAll('RUNNING'))) as Job[];
+    const runningSet = new Set(runningJobs.map((j) => j.videoId));
+    return new Set(videoIds.filter((id) => runningSet.has(id)));
+  }
+
+  async getSucceededVideoIds(videoIds: string[]): Promise<Set<string>> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
+    const index = tx.objectStore(JOB_DB.STORES.JOBS).index('byStatus');
+    const succeededJobs = (await requestToPromise(index.getAll('SUCCEEDED'))) as Job[];
+    const succeededSet = new Set(succeededJobs.map((j) => j.videoId));
+    return new Set(videoIds.filter((id) => succeededSet.has(id)));
+  }
+
+  async backfillChannelIdOnJobs(
+    channelId: string,
+    channelTitle: string,
+    videoIds: string[]
+  ): Promise<void> {
+    if (!videoIds.length) return;
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readwrite');
+    const store = tx.objectStore(JOB_DB.STORES.JOBS);
+    const videoIdSet = new Set(videoIds);
+
+    const allJobs = (await requestToPromise(store.getAll())) as Job[];
+    for (const job of allJobs) {
+      if (videoIdSet.has(job.videoId) && !job.channelId) {
+        store.put({ ...job, channelId, channelTitle });
+      }
+    }
+    await transactionComplete(tx);
+  }
+
+  async getJobsMissingChannelId(): Promise<Job[]> {
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readonly');
+    const allJobs = (await requestToPromise(tx.objectStore(JOB_DB.STORES.JOBS).getAll())) as Job[];
+    return allJobs.filter((j) => j.platform === 'youtube' && !j.channelId);
+  }
+
+  async bulkUpdateChannelIds(
+    updates: Array<{ jobId: string; channelId: string; channelTitle: string }>
+  ): Promise<void> {
+    if (!updates.length) return;
+    const db = await this.openDb();
+    const tx = db.transaction(JOB_DB.STORES.JOBS, 'readwrite');
+    const store = tx.objectStore(JOB_DB.STORES.JOBS);
+
+    for (const { jobId, channelId, channelTitle } of updates) {
+      const job = (await requestToPromise(store.get(jobId))) as Job | undefined;
+      if (job && !job.channelId) {
+        store.put({ ...job, channelId, channelTitle });
+      }
+    }
+    await transactionComplete(tx);
+  }
+
+  async getDiscoveredChannels(): Promise<
+    Map<string, { channelId: string; channelTitle: string; videoIds: Set<string> }>
+  > {
+    const db = await this.openDb();
+    const tx = db.transaction([JOB_DB.STORES.JOBS, JOB_DB.STORES.CHANNELS], 'readonly');
+    const allJobs = (await requestToPromise(tx.objectStore(JOB_DB.STORES.JOBS).getAll())) as Job[];
+    const allChannels = (await requestToPromise(
+      tx.objectStore(JOB_DB.STORES.CHANNELS).getAll()
+    )) as Channel[];
+    const subscribedIds = new Set(allChannels.map((c) => c.channelId));
+
+    const map = new Map<
+      string,
+      { channelId: string; channelTitle: string; videoIds: Set<string> }
+    >();
+    for (const job of allJobs) {
+      if (!job.channelId || subscribedIds.has(job.channelId)) continue;
+      const entry = map.get(job.channelId);
+      if (entry) {
+        entry.videoIds.add(job.videoId);
+      } else {
+        map.set(job.channelId, {
+          channelId: job.channelId,
+          channelTitle: job.channelTitle || 'Unknown Channel',
+          videoIds: new Set([job.videoId]),
+        });
+      }
+    }
+    return map;
   }
 
   async migrateCachedSummaries(cachedSummaries: CachedSummary[]): Promise<void> {
