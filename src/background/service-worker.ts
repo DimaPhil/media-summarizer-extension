@@ -1,350 +1,27 @@
 import type {
-  Message,
-  StartJobRequest,
-  SummarizationResult,
-  VideoInfo,
-  CachedSummary,
-  Platform,
-  Job,
   ExtensionSettings,
+  Job,
   JobListQuery,
+  Message,
+  Platform,
   PromptTemplate,
+  StartJobRequest,
+  VideoInfo,
 } from '../shared/types';
-import { ErrorCode, SummarizationError, ERROR_MESSAGES } from '../shared/errors';
 import { storage } from './storage';
-import { GeminiClient } from './gemini-client';
+import { jobStore } from './job-store';
+import { ensureBackgroundInitialized } from './background-init';
 import {
-  fetchVideoDetails,
-  fetchVideoDetailsBatch,
-  fetchChannelDetails,
-  fetchChannelVideos,
-  fetchVideoDurations,
-  fetchChannelThumbnails,
-} from './youtube-api';
-import { getVideoKey, jobStore } from './job-store';
-import type { Channel, ChannelVideo } from '../shared/types';
-
-const MAX_SINGLE_REQUEST_VIDEO_SEC = 55 * 60;
-const DEFAULT_CHUNK_DURATION_SEC = 12 * 60;
-const DEFAULT_CHUNK_OVERLAP_SEC = 8;
-const RUNNING_HEARTBEAT_MS = 10 * 1000;
-const STALE_JOB_THRESHOLD_MS = 45 * 1000;
-const DAILY_CHANNEL_REFRESH_ALARM = 'daily-channel-refresh';
-const DAILY_CHANNEL_REFRESH_PERIOD_MINUTES = 24 * 60;
-const DAILY_CHANNEL_REFRESH_HOUR_LOCAL = 9;
-
-const runningControllers = new Map<string, AbortController>();
-
-let initPromise: Promise<void> | null = null;
-
-function notifyChannelUpdated(channelId: string): void {
-  chrome.runtime
-    .sendMessage({
-      type: 'CHANNEL_UPDATED',
-      payload: { channelId },
-    })
-    .catch(() => {});
-}
-
-function notifyJobUpdated(jobId: string): void {
-  chrome.runtime
-    .sendMessage({
-      type: 'JOB_UPDATED',
-      payload: { jobId },
-    })
-    .catch(() => {});
-}
-
-function isSubscribedChannel(channel: Channel | null | undefined): boolean {
-  return channel?.subscribed !== false;
-}
-
-function isChannelVideoNew(
-  channel: Pick<Channel, 'addedAt' | 'newVideosSinceAt'>,
-  video: ChannelVideo,
-  succeededIds: Set<string>
-): boolean {
-  const baseline = channel.newVideosSinceAt ?? channel.addedAt;
-  return video.publishedAt > baseline && !video.ignored && !succeededIds.has(video.videoId);
-}
-
-function getNextDailyRefreshTime(base = new Date()): number {
-  const next = new Date(base);
-  next.setHours(DAILY_CHANNEL_REFRESH_HOUR_LOCAL, 0, 0, 0);
-  if (next.getTime() <= base.getTime()) {
-    next.setDate(next.getDate() + 1);
-  }
-  return next.getTime();
-}
-
-async function scheduleDailyChannelRefresh(settings?: ExtensionSettings): Promise<void> {
-  const currentSettings = settings ?? (await storage.getSettings());
-  if (!currentSettings.autoRefreshChannelsDaily || !currentSettings.youtubeApiKey) {
-    await chrome.alarms.clear(DAILY_CHANNEL_REFRESH_ALARM);
-    return;
-  }
-
-  chrome.alarms.create(DAILY_CHANNEL_REFRESH_ALARM, {
-    when: getNextDailyRefreshTime(),
-    periodInMinutes: DAILY_CHANNEL_REFRESH_PERIOD_MINUTES,
-  });
-}
-
-async function syncChannelCatalog(
-  channelId: string,
-  settings: ExtensionSettings,
-  subscribedOverride?: boolean
-): Promise<Channel> {
-  if (!settings.youtubeApiKey) {
-    throw new Error('YouTube API key not configured');
-  }
-
-  const existing = await jobStore.getChannel(channelId);
-  const channelDetails = await fetchChannelDetails(channelId, settings.youtubeApiKey);
-  if (!channelDetails) {
-    throw new Error('Could not fetch channel details');
-  }
-
-  const playlistVideos = await fetchChannelVideos(
-    channelDetails.uploadsPlaylistId,
-    settings.youtubeApiKey
-  );
-
-  const videoIds = playlistVideos.map((video) => video.videoId);
-  const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
-  const now = Date.now();
-  const previousLastFetchedAt = existing?.lastFetchedAt;
-
-  const channel: Channel = {
-    channelId: channelDetails.channelId,
-    title: channelDetails.title,
-    thumbnailUrl: channelDetails.thumbnailUrl,
-    uploadsPlaylistId: channelDetails.uploadsPlaylistId,
-    addedAt:
-      subscribedOverride === true && existing?.subscribed === false
-        ? now
-        : (existing?.addedAt ?? now),
-    lastFetchedAt: now,
-    newVideosSinceAt: previousLastFetchedAt ?? now,
-    subscribed: subscribedOverride ?? existing?.subscribed ?? true,
-  };
-
-  const channelVideos: ChannelVideo[] = playlistVideos.map((video) => ({
-    videoId: video.videoId,
-    channelId: channel.channelId,
-    title: video.title,
-    thumbnailUrl: video.thumbnailUrl,
-    publishedAt: new Date(video.publishedAt).getTime(),
-    duration: durations[video.videoId],
-    ignored: false,
-    discoveredAt: now,
-  }));
-
-  await jobStore.addChannel(channel);
-  await jobStore.upsertChannelVideos(channelVideos);
-  await jobStore.backfillChannelIdOnJobs(channel.channelId, channel.title, videoIds);
-  notifyChannelUpdated(channel.channelId);
-
-  return channel;
-}
-
-async function refreshAllTrackedChannels(
-  settings: ExtensionSettings
-): Promise<{ refreshedCount: number; failedCount: number }> {
-  if (!settings.youtubeApiKey) {
-    throw new Error('YouTube API key not configured');
-  }
-
-  const storedChannels = await jobStore.listChannels();
-  const discoveredChannels = await jobStore.getDiscoveredChannels();
-  const refreshTargets = new Map<string, boolean>();
-
-  for (const channel of storedChannels) {
-    refreshTargets.set(channel.channelId, isSubscribedChannel(channel));
-  }
-
-  for (const [channelId] of discoveredChannels) {
-    if (!refreshTargets.has(channelId)) {
-      refreshTargets.set(channelId, false);
-    }
-  }
-
-  let refreshedCount = 0;
-  let failedCount = 0;
-
-  for (const [channelId, subscribed] of refreshTargets) {
-    try {
-      await syncChannelCatalog(channelId, settings, subscribed);
-      refreshedCount += 1;
-    } catch (error) {
-      failedCount += 1;
-      console.warn('Failed to refresh channel:', channelId, error);
-    }
-  }
-
-  return { refreshedCount, failedCount };
-}
-
-function isDurationOrContextError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  const lowered = message.toLowerCase();
-  return (
-    lowered.includes('too long') ||
-    lowered.includes('maximum') ||
-    lowered.includes('context') ||
-    lowered.includes('token') ||
-    lowered.includes('size') ||
-    lowered.includes('input')
-  );
-}
-
-function parseDurationToSeconds(duration?: string): number | null {
-  if (!duration) {
-    return null;
-  }
-
-  const raw = duration.trim();
-  if (!raw) {
-    return null;
-  }
-
-  const parts = raw.split(':').map((part) => parseInt(part, 10));
-  if (parts.some((part) => Number.isNaN(part))) {
-    return null;
-  }
-
-  if (parts.length === 3) {
-    return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  }
-
-  if (parts.length === 2) {
-    return parts[0] * 60 + parts[1];
-  }
-
-  if (parts.length === 1) {
-    return parts[0];
-  }
-
-  return null;
-}
-
-function createSegments(durationSec: number, chunkSec: number, overlapSec: number) {
-  const segments: Array<{ index: number; startSec: number; endSec: number }> = [];
-
-  let startSec = 0;
-  let index = 0;
-
-  while (startSec < durationSec) {
-    const endSec = Math.min(startSec + chunkSec, durationSec);
-    segments.push({
-      index,
-      startSec,
-      endSec,
-    });
-
-    if (endSec >= durationSec) {
-      break;
-    }
-
-    const nextStart = Math.max(endSec - overlapSec, startSec + 1);
-    startSec = nextStart;
-    index += 1;
-  }
-
-  return segments;
-}
-
-function mergeSegmentOutputsFallback(segmentOutputs: string[]): string {
-  if (segmentOutputs.length === 0) {
-    return '';
-  }
-
-  const normalized = segmentOutputs.map((part) => part.trim()).filter(Boolean);
-  if (normalized.length <= 1) {
-    return normalized[0] || '';
-  }
-
-  let merged = normalized[0];
-
-  for (let i = 1; i < normalized.length; i += 1) {
-    const next = normalized[i];
-    const currentTail = merged.slice(-500);
-    const nextHead = next.slice(0, 500);
-
-    let overlap = 0;
-    const maxOverlap = Math.min(currentTail.length, nextHead.length);
-
-    for (let size = maxOverlap; size >= 25; size -= 1) {
-      const tail = currentTail.slice(currentTail.length - size).toLowerCase();
-      const head = nextHead.slice(0, size).toLowerCase();
-      if (tail === head) {
-        overlap = size;
-        break;
-      }
-    }
-
-    merged += overlap > 0 ? next.slice(overlap) : `\n\n${next}`;
-  }
-
-  return merged;
-}
-
-function withTimeout<T>(
-  promise: Promise<T>,
-  timeoutMs: number,
-  errorMessage: string,
-  signal?: AbortSignal
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException('Aborted', 'AbortError'));
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      reject(new SummarizationError(ErrorCode.TIMEOUT, errorMessage));
-    }, timeoutMs);
-
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-
-    signal?.addEventListener('abort', onAbort, { once: true });
-
-    promise
-      .then((result) => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-        resolve(result);
-      })
-      .catch((error) => {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', onAbort);
-        reject(error);
-      });
-  });
-}
-
-async function ensureInitialized(): Promise<void> {
-  if (!initPromise) {
-    initPromise = (async () => {
-      await storage.initialize();
-      await jobStore.initialize();
-
-      const migrated = await jobStore.isCacheMigrated();
-      if (!migrated) {
-        const cachedSummaries = await storage.getAllCachedSummaries();
-        await jobStore.migrateCachedSummaries(cachedSummaries);
-      }
-    })().catch((error) => {
-      initPromise = null;
-      throw error;
-    });
-  }
-
-  await initPromise;
-}
+  DAILY_CHANNEL_REFRESH_ALARM,
+  isChannelVideoNew,
+  isSubscribedChannel,
+  refreshAllTrackedChannels,
+  scheduleDailyChannelRefresh,
+  syncChannelCatalog,
+} from './channel-sync';
+import { cancelRunningJob, getFreshActiveJob, startJob, testApiKey } from './job-runner';
+import { notifyChannelUpdated, notifyJobUpdated } from './background-notifications';
+import { fetchChannelThumbnails, fetchVideoDetails, fetchVideoDetailsBatch } from './youtube-api';
 
 async function getVideoInfoFromTab(tabId: number): Promise<VideoInfo | null> {
   try {
@@ -355,467 +32,421 @@ async function getVideoInfoFromTab(tabId: number): Promise<VideoInfo | null> {
   }
 }
 
-async function getFreshActiveJob(
-  videoId: string,
-  platform: Platform,
-  _timeoutMs: number
-): Promise<Job | null> {
-  const videoKey = getVideoKey(videoId, platform);
-  const activeJob = await jobStore.getActiveJobByVideoKey(videoKey);
+async function handleMessage(
+  message: Message | { type: string; payload?: unknown }
+): Promise<unknown> {
+  await ensureBackgroundInitialized();
 
-  if (!activeJob || activeJob.status !== 'RUNNING') {
-    return activeJob;
-  }
-
-  const staleThresholdMs = STALE_JOB_THRESHOLD_MS;
-  const ageMs = Date.now() - activeJob.updatedAt;
-
-  if (ageMs <= staleThresholdMs) {
-    return activeJob;
-  }
-
-  await jobStore.completeJob(activeJob.jobId, {
-    status: 'FAILED',
-    errorMessage: 'Previous job lock expired. The extension worker was likely restarted.',
-  });
-  notifyJobUpdated(activeJob.jobId);
-  return null;
-}
-
-function startRunningHeartbeat(jobId: string): () => void {
-  const timer = setInterval(() => {
-    void jobStore
-      .updateJob(jobId, {})
-      .then((job) => {
-        if (job && job.status === 'RUNNING') {
-          notifyJobUpdated(jobId);
+  switch (message.type) {
+    case 'GET_VIDEO_INFO': {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tabs[0]?.id) {
+        const videoInfo = await getVideoInfoFromTab(tabs[0].id);
+        if (videoInfo && videoInfo.platform === 'youtube') {
+          const settings = await storage.getSettings();
+          if (settings.youtubeApiKey) {
+            const details = await fetchVideoDetails(videoInfo.videoId, settings.youtubeApiKey);
+            if (details) {
+              videoInfo.categoryId = details.categoryId;
+              videoInfo.categoryName = details.categoryName;
+              videoInfo.title = details.title || videoInfo.title;
+              videoInfo.channelId = details.channelId;
+              videoInfo.channelTitle = details.channelTitle;
+              if (details.duration) {
+                videoInfo.duration = details.duration;
+              }
+            }
+          }
         }
-      })
-      .catch(() => {});
-  }, RUNNING_HEARTBEAT_MS);
-
-  return () => clearInterval(timer);
-}
-
-async function runSingleRequest(
-  job: Job,
-  request: StartJobRequest,
-  promptText: string,
-  client: GeminiClient,
-  timeoutMs: number,
-  streamResponse: boolean,
-  signal?: AbortSignal
-): Promise<string> {
-  if (streamResponse) {
-    const runStreaming = async (): Promise<string> => {
-      let fullText = '';
-      const stream = client.summarizeYouTubeVideoStream(request.videoInfo, promptText);
-
-      for await (const chunk of stream) {
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-        fullText += chunk;
-        await jobStore.appendJobOutput(job.jobId, chunk);
-        notifyJobUpdated(job.jobId);
-
-        chrome.runtime
-          .sendMessage({
-            type: 'SUMMARIZE_STREAM',
-            payload: { chunk, done: false, jobId: job.jobId },
-          })
-          .catch(() => {});
+        return { type: 'VIDEO_INFO_RESPONSE', payload: videoInfo };
       }
-
-      chrome.runtime
-        .sendMessage({
-          type: 'SUMMARIZE_STREAM',
-          payload: { chunk: '', done: true, jobId: job.jobId },
-        })
-        .catch(() => {});
-
-      return fullText;
-    };
-
-    return withTimeout(
-      runStreaming(),
-      timeoutMs,
-      `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
-      signal
-    );
-  }
-
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-  const fullText = await withTimeout(
-    client.summarizeYouTubeVideo(request.videoInfo, promptText),
-    timeoutMs,
-    `Summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
-    signal
-  );
-
-  await jobStore.updateJob(job.jobId, { outputText: fullText });
-  notifyJobUpdated(job.jobId);
-  return fullText;
-}
-
-async function runChunkedRequest(
-  job: Job,
-  request: StartJobRequest,
-  promptText: string,
-  client: GeminiClient,
-  durationSec: number,
-  timeoutMs: number,
-  signal?: AbortSignal
-): Promise<{ outputText: string; segments: Job['segments']; mergeOutputText?: string }> {
-  const segments = createSegments(
-    durationSec,
-    DEFAULT_CHUNK_DURATION_SEC,
-    DEFAULT_CHUNK_OVERLAP_SEC
-  );
-  const completedSegments: NonNullable<Job['segments']> = [];
-
-  await jobStore.updateJob(job.jobId, {
-    outputText: '',
-    segments: [],
-    modelSnapshot: {
-      ...job.modelSnapshot,
-      chunkingUsed: true,
-      chunkDurationSec: DEFAULT_CHUNK_DURATION_SEC,
-      chunkOverlapSec: DEFAULT_CHUNK_OVERLAP_SEC,
-    },
-  });
-  notifyJobUpdated(job.jobId);
-
-  for (const segment of segments) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-    const summarizeSegment = async () => {
-      let segmentText = '';
-      const stream = client.summarizeYouTubeVideoStream(request.videoInfo, promptText, {
-        startSec: segment.startSec,
-        endSec: segment.endSec,
-      });
-
-      for await (const chunk of stream) {
-        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-        segmentText += chunk;
-        await jobStore.appendJobOutput(job.jobId, chunk, {
-          index: segment.index,
-          startSec: segment.startSec,
-          endSec: segment.endSec,
-        });
-        notifyJobUpdated(job.jobId);
-      }
-
-      return segmentText;
-    };
-
-    const outputText = await withTimeout(
-      summarizeSegment(),
-      timeoutMs,
-      `Segment summarization timed out after ${Math.round(timeoutMs / 60000)} minutes`,
-      signal
-    );
-
-    completedSegments.push({
-      index: segment.index,
-      startSec: segment.startSec,
-      endSec: segment.endSec,
-      outputText,
-    });
-
-    notifyJobUpdated(job.jobId);
-  }
-
-  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-
-  let mergeOutputText = '';
-
-  try {
-    mergeOutputText = await withTimeout(
-      client.mergeSegmentOutputs(promptText, completedSegments),
-      timeoutMs,
-      `Merge step timed out after ${Math.round(timeoutMs / 60000)} minutes`,
-      signal
-    );
-  } catch {
-    mergeOutputText = mergeSegmentOutputsFallback(
-      completedSegments.map((segment) => segment.outputText)
-    );
-  }
-
-  return {
-    outputText: mergeOutputText,
-    segments: completedSegments,
-    mergeOutputText,
-  };
-}
-
-async function runJob(
-  jobId: string,
-  request: StartJobRequest,
-  prompt: PromptTemplate,
-  settings: ExtensionSettings
-) {
-  const initialJob = await jobStore.getJob(jobId);
-  if (!initialJob || initialJob.status !== 'RUNNING') {
-    return;
-  }
-
-  const controller = new AbortController();
-  runningControllers.set(jobId, controller);
-  const { signal } = controller;
-
-  const stopHeartbeat = startRunningHeartbeat(jobId);
-  const timeoutMs = (settings.summarizationTimeoutMinutes || 5) * 60 * 1000;
-
-  try {
-    const client = new GeminiClient(settings.geminiApiKey, settings.geminiModel);
-
-    if (request.videoInfo.platform !== 'youtube') {
-      throw new SummarizationError(ErrorCode.UNSUPPORTED_PLATFORM);
+      return { type: 'VIDEO_INFO_RESPONSE', payload: null };
     }
 
-    const durationSec = parseDurationToSeconds(request.videoInfo.duration);
-    const shouldChunkBeforeStart = Boolean(
-      durationSec && durationSec > MAX_SINGLE_REQUEST_VIDEO_SEC
-    );
-
-    let outputText = '';
-    let segments: Job['segments'];
-    let mergeOutputText: string | undefined;
-
-    if (shouldChunkBeforeStart && durationSec) {
-      const chunked = await runChunkedRequest(
-        initialJob,
-        request,
-        prompt.prompt,
-        client,
-        durationSec,
-        timeoutMs,
-        signal
-      );
-      outputText = chunked.outputText;
-      segments = chunked.segments;
-      mergeOutputText = chunked.mergeOutputText;
-    } else {
-      try {
-        outputText = await runSingleRequest(
-          initialJob,
-          request,
-          prompt.prompt,
-          client,
-          timeoutMs,
-          settings.streamResponse,
-          signal
-        );
-      } catch (error) {
-        if (signal.aborted) throw error;
-        if (durationSec && isDurationOrContextError(error)) {
-          const chunked = await runChunkedRequest(
-            initialJob,
-            request,
-            prompt.prompt,
-            client,
-            durationSec,
-            timeoutMs,
-            signal
-          );
-          outputText = chunked.outputText;
-          segments = chunked.segments;
-          mergeOutputText = chunked.mergeOutputText;
-        } else {
-          throw error;
-        }
-      }
+    case 'SUMMARIZE':
+    case 'START_JOB': {
+      const request = message.payload as StartJobRequest;
+      const result = await startJob(request);
+      return { type: 'SUMMARIZE_RESPONSE', payload: result };
     }
 
-    const finalJob = await jobStore.completeJob(jobId, {
-      status: 'SUCCEEDED',
-      outputText,
-      segments,
-      mergeOutputText,
-    });
-
-    const cachedSummary: CachedSummary = {
-      videoId: request.videoInfo.videoId,
-      platform: request.videoInfo.platform,
-      videoTitle: request.videoInfo.title,
-      videoUrl: request.videoInfo.url,
-      promptId: request.promptId,
-      promptName: prompt.name,
-      summary: outputText,
-      timestamp: Date.now(),
-    };
-    await storage.saveCachedSummary(cachedSummary);
-
-    if (finalJob) {
-      notifyJobUpdated(finalJob.jobId);
+    case 'GET_SETTINGS': {
+      const settings = await storage.getSettings();
+      return { type: 'SETTINGS_RESPONSE', payload: settings };
     }
 
-    chrome.runtime
-      .sendMessage({
-        type: 'SUMMARIZE_RESPONSE',
-        payload: {
-          success: true,
-          summary: outputText,
-          cached: false,
-          jobId,
-          status: 'SUCCEEDED',
-        } satisfies SummarizationResult,
-      })
-      .catch(() => {});
-  } catch (error) {
-    if (signal.aborted) {
-      const canceledJob = await jobStore.completeJob(jobId, { status: 'CANCELED' });
-      if (canceledJob) notifyJobUpdated(canceledJob.jobId);
-      return;
+    case 'SAVE_SETTINGS': {
+      const settings = message.payload as ExtensionSettings;
+      await storage.saveSettings(settings);
+      await scheduleDailyChannelRefresh(settings);
+      return { type: 'SETTINGS_RESPONSE', payload: settings };
     }
 
-    const summError =
-      error instanceof SummarizationError
-        ? error
-        : new SummarizationError(ErrorCode.UNKNOWN_ERROR, String(error));
-
-    const failedJob = await jobStore.completeJob(jobId, {
-      status: 'FAILED',
-      errorMessage: summError.message,
-    });
-
-    if (failedJob) {
-      notifyJobUpdated(failedJob.jobId);
+    case 'GET_PROMPTS': {
+      const prompts = await storage.getPrompts();
+      return { type: 'PROMPTS_RESPONSE', payload: prompts };
     }
 
-    chrome.runtime
-      .sendMessage({
-        type: 'SUMMARIZE_RESPONSE',
-        payload: {
-          success: false,
-          error: summError.message,
-          jobId,
-          status: 'FAILED',
-        } satisfies SummarizationResult,
-      })
-      .catch(() => {});
-  } finally {
-    runningControllers.delete(jobId);
-    stopHeartbeat();
-  }
-}
+    case 'SAVE_PROMPTS': {
+      const prompts = message.payload as PromptTemplate[];
+      await storage.savePrompts(prompts);
+      return { type: 'PROMPTS_RESPONSE', payload: prompts };
+    }
 
-async function startJob(request: StartJobRequest): Promise<SummarizationResult> {
-  await ensureInitialized();
+    case 'RESET_DEFAULTS': {
+      await storage.resetToDefaults();
+      const allData = await storage.getAllData();
+      return { type: 'SETTINGS_RESPONSE', payload: allData };
+    }
 
-  const settings = await storage.getSettings();
+    case 'TEST_API_KEY': {
+      const apiKey = message.payload as string;
+      const isValid = await testApiKey(apiKey);
+      return { type: 'API_KEY_TEST_RESULT', payload: isValid };
+    }
 
-  if (!settings.geminiApiKey) {
-    return {
-      success: false,
-      error: ERROR_MESSAGES[ErrorCode.NO_API_KEY],
-    };
-  }
+    case 'GET_CACHED_SUMMARY': {
+      const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+      const cached = await storage.getCachedSummary(videoId, platform);
+      return { type: 'CACHED_SUMMARY_RESPONSE', payload: cached };
+    }
 
-  const prompt = await storage.getPromptById(request.promptId);
-  if (!prompt) {
-    return {
-      success: false,
-      error: 'Selected prompt not found',
-    };
-  }
+    case 'CLEAR_CACHED_SUMMARY': {
+      const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+      await storage.clearCachedSummary(videoId, platform);
+      return { type: 'CACHED_SUMMARY_RESPONSE', payload: null };
+    }
 
-  const { videoInfo } = request;
-  const timeoutMs = (settings.summarizationTimeoutMinutes || 5) * 60 * 1000;
-  const activeJob = await getFreshActiveJob(videoInfo.videoId, videoInfo.platform, timeoutMs);
+    case 'GET_ALL_CACHED_SUMMARIES': {
+      const summaries = await storage.getAllCachedSummaries();
+      return { type: 'CACHED_SUMMARY_RESPONSE', payload: summaries };
+    }
 
-  if (activeJob && activeJob.status === 'RUNNING') {
-    return {
-      success: false,
-      inProgress: true,
-      error: 'Summarization already in progress for this video',
-      jobId: activeJob.jobId,
-      status: activeJob.status,
-    };
-  }
-
-  if (!request.forceRegenerate) {
-    const cached = await storage.getCachedSummary(videoInfo.videoId, videoInfo.platform);
-    if (cached && cached.promptId === request.promptId) {
+    case 'CHECK_IN_PROGRESS': {
+      const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+      const activeJob = await getFreshActiveJob(videoId, platform);
       return {
-        success: true,
-        summary: cached.summary,
-        cached: true,
+        type: 'IN_PROGRESS_RESPONSE',
+        payload: {
+          inProgress: Boolean(activeJob && activeJob.status === 'RUNNING'),
+          startTime: activeJob?.startedAt,
+          promptId: activeJob?.promptId,
+          jobId: activeJob?.jobId,
+        },
       };
     }
-  }
 
-  const created = await jobStore.createRunningJob({
-    videoKey: getVideoKey(videoInfo.videoId, videoInfo.platform),
-    platform: videoInfo.platform,
-    videoId: videoInfo.videoId,
-    videoUrl: videoInfo.url,
-    videoTitle: videoInfo.title,
-    thumbnailUrl:
-      videoInfo.platform === 'youtube'
-        ? `https://i.ytimg.com/vi/${videoInfo.videoId}/hqdefault.jpg`
-        : undefined,
-    categoryId: videoInfo.categoryId,
-    categoryName: videoInfo.categoryName,
-    channelId: videoInfo.channelId,
-    channelTitle: videoInfo.channelTitle,
-    promptId: prompt.id,
-    promptName: prompt.name,
-    promptTextSnapshot: prompt.prompt,
-    modelSnapshot: {
-      model: settings.geminiModel,
-      streamResponse: settings.streamResponse,
-      summarizationTimeoutMinutes: settings.summarizationTimeoutMinutes,
-      chunkingUsed: false,
-    },
-    outputText: '',
-    editedText: '',
-    segments: [],
-  });
+    case 'GET_ACTIVE_JOB': {
+      const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
+      const activeJob = await getFreshActiveJob(videoId, platform);
+      return { type: 'ACTIVE_JOB_RESPONSE', payload: activeJob };
+    }
 
-  if (!created.created) {
-    return {
-      success: false,
-      inProgress: true,
-      error: 'Summarization already in progress for this video',
-      jobId: created.job.jobId,
-      status: created.job.status,
-    };
-  }
+    case 'GET_JOB': {
+      const { jobId } = message.payload as { jobId: string };
+      const job = await jobStore.getJob(jobId);
+      return { type: 'JOB_RESPONSE', payload: job };
+    }
 
-  notifyJobUpdated(created.job.jobId);
+    case 'LIST_JOBS': {
+      const query = (message.payload || {}) as JobListQuery;
+      const jobs = await jobStore.listJobs(query);
+      return { type: 'LIST_JOBS_RESPONSE', payload: jobs };
+    }
 
-  void runJob(created.job.jobId, request, prompt, settings);
+    case 'UPDATE_JOB_EDITED_TEXT': {
+      const payload = message.payload as { jobId: string; editedText: string };
+      const job = await jobStore.updateEditedText(payload.jobId, payload.editedText);
+      if (job) {
+        notifyJobUpdated(job.jobId);
+      }
+      return { type: 'JOB_RESPONSE', payload: job };
+    }
 
-  return {
-    success: true,
-    inProgress: true,
-    summary: '',
-    cached: false,
-    jobId: created.job.jobId,
-    status: created.job.status,
-  };
-}
+    case 'DELETE_JOB': {
+      const payload = message.payload as { jobId: string };
+      const deleted = await jobStore.deleteJob(payload.jobId);
+      return { type: 'JOB_RESPONSE', payload: { deleted } };
+    }
 
-async function testApiKey(apiKey: string): Promise<boolean> {
-  try {
-    const client = new GeminiClient(apiKey);
-    return await client.testConnection();
-  } catch {
-    return false;
+    case 'CLEAR_ALL_JOBS': {
+      await jobStore.clearAllJobs();
+      return { type: 'JOB_RESPONSE', payload: { success: true } };
+    }
+
+    case 'ADD_CHANNEL': {
+      const payload = message.payload as { videoId?: string; channelId?: string };
+      const settings = await storage.getSettings();
+      if (!settings.youtubeApiKey) {
+        return { error: 'YouTube API key not configured' };
+      }
+
+      let channelId = payload.channelId;
+
+      if (!channelId && payload.videoId) {
+        const details = await fetchVideoDetails(payload.videoId, settings.youtubeApiKey);
+        if (!details) {
+          return { error: 'Could not find video details' };
+        }
+        channelId = details.channelId;
+      }
+
+      if (!channelId) {
+        return { error: 'No channel ID provided or resolved' };
+      }
+
+      const existing = await jobStore.getChannel(channelId);
+      if (existing) {
+        if (isSubscribedChannel(existing)) {
+          return { type: 'CHANNEL_UPDATED', payload: existing };
+        }
+
+        const upgradedChannel = await syncChannelCatalog(channelId, settings, true);
+        return { type: 'CHANNEL_UPDATED', payload: upgradedChannel };
+      }
+
+      const channel = await syncChannelCatalog(channelId, settings, true);
+      return { type: 'CHANNEL_UPDATED', payload: channel };
+    }
+
+    case 'REMOVE_CHANNEL': {
+      const { channelId } = message.payload as { channelId: string };
+      await jobStore.removeChannel(channelId);
+      return { type: 'CHANNEL_UPDATED', payload: { removed: true, channelId } };
+    }
+
+    case 'LIST_CHANNELS': {
+      const channels = await jobStore.listChannels();
+      const channelsWithCounts = await Promise.all(
+        channels.map(async (channel) => {
+          const videos = await jobStore.listChannelVideos(channel.channelId);
+          const videoIds = videos.map((video) => video.videoId);
+          const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+          const newCount = videos.filter((video) =>
+            isChannelVideoNew(channel, video, succeededIds)
+          ).length;
+          return {
+            ...channel,
+            subscribed: isSubscribedChannel(channel),
+            newCount,
+            totalCount: videos.length,
+          };
+        })
+      );
+
+      const discovered = await jobStore.getDiscoveredChannels();
+      if (discovered.size > 0) {
+        const settings = await storage.getSettings();
+        const discoveredIds = [...discovered.keys()];
+        const thumbnails = settings.youtubeApiKey
+          ? await fetchChannelThumbnails(discoveredIds, settings.youtubeApiKey)
+          : new Map<string, string>();
+
+        for (const [, entry] of discovered) {
+          channelsWithCounts.push({
+            channelId: entry.channelId,
+            title: entry.channelTitle,
+            thumbnailUrl: thumbnails.get(entry.channelId),
+            uploadsPlaylistId: '',
+            addedAt: 0,
+            subscribed: false,
+            newCount: 0,
+            totalCount: entry.videoIds.size,
+          });
+        }
+      }
+
+      return { type: 'LIST_CHANNELS_RESPONSE', payload: channelsWithCounts };
+    }
+
+    case 'FETCH_CHANNEL_VIDEOS': {
+      const { channelId } = message.payload as { channelId: string };
+      const channel = await jobStore.getChannel(channelId);
+      if (!channel) {
+        return { error: 'Channel not found' };
+      }
+
+      const settings = await storage.getSettings();
+      if (!settings.youtubeApiKey) {
+        return { error: 'YouTube API key not configured' };
+      }
+
+      await syncChannelCatalog(channelId, settings, isSubscribedChannel(channel));
+      return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: { success: true } };
+    }
+
+    case 'REFRESH_ALL_CHANNELS': {
+      const settings = await storage.getSettings();
+      const { refreshedCount, failedCount } = await refreshAllTrackedChannels(settings);
+      return { type: 'CHANNEL_UPDATED', payload: { refreshedCount, failedCount } };
+    }
+
+    case 'LIST_CHANNEL_VIDEOS': {
+      const { channelId } = message.payload as { channelId: string };
+      const channel = await jobStore.getChannel(channelId);
+      const storedVideos = await jobStore.listChannelVideos(channelId);
+
+      if (channel || storedVideos.length > 0) {
+        const videoIds = storedVideos.map((video) => video.videoId);
+        const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+        const runningIds = await jobStore.getRunningVideoIds(videoIds);
+        const failedIds = await jobStore.getFailedVideoIds(videoIds);
+
+        const annotated = storedVideos.map((video) => ({
+          ...video,
+          hasTranscription: succeededIds.has(video.videoId),
+          isRunning: runningIds.has(video.videoId),
+          isFailed: failedIds.has(video.videoId) && !succeededIds.has(video.videoId),
+          isNew: isChannelVideoNew(channel || { addedAt: 0 }, video, succeededIds),
+        }));
+        return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
+      }
+
+      const channelJobs = await jobStore.listJobsByChannel(channelId);
+      const videoMap = new Map<
+        string,
+        { job: Job; hasTranscription: boolean; isRunning: boolean; isFailed: boolean }
+      >();
+
+      for (const job of channelJobs) {
+        const existing = videoMap.get(job.videoId);
+        const succeeded = job.status === 'SUCCEEDED';
+        const running = job.status === 'RUNNING';
+        const failed = job.status === 'FAILED';
+        if (!existing) {
+          videoMap.set(job.videoId, {
+            job,
+            hasTranscription: succeeded,
+            isRunning: running,
+            isFailed: failed,
+          });
+        } else {
+          if (succeeded) existing.hasTranscription = true;
+          if (running) existing.isRunning = true;
+          if (failed) existing.isFailed = true;
+        }
+      }
+
+      const annotated = Array.from(videoMap.values()).map(
+        ({ job, hasTranscription, isRunning, isFailed }) => ({
+          videoId: job.videoId,
+          channelId: job.channelId || channelId,
+          title: job.videoTitle,
+          thumbnailUrl: job.thumbnailUrl,
+          publishedAt: job.createdAt,
+          duration: undefined as string | undefined,
+          ignored: false,
+          discoveredAt: job.createdAt,
+          hasTranscription,
+          isRunning: isRunning && !hasTranscription,
+          isFailed: isFailed && !hasTranscription,
+          isNew: false,
+        })
+      );
+
+      return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
+    }
+
+    case 'IGNORE_VIDEO': {
+      const { videoId, ignored } = message.payload as { videoId: string; ignored: boolean };
+      const updated = await jobStore.setVideoIgnored(videoId, ignored);
+      if (updated) {
+        notifyChannelUpdated(updated.channelId);
+      }
+      return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: updated };
+    }
+
+    case 'BATCH_TRANSCRIBE': {
+      const { channelId, promptId } = message.payload as {
+        channelId: string;
+        promptId: string;
+      };
+      const videos = await jobStore.listChannelVideos(channelId);
+      const videoIds = videos.map((video) => video.videoId);
+      const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
+      const channel = await jobStore.getChannel(channelId);
+      const newVideos = videos.filter((video) =>
+        isChannelVideoNew(channel || { addedAt: 0 }, video, succeededIds)
+      );
+
+      const results: Array<{ videoId: string; jobId?: string; error?: string }> = [];
+
+      for (const video of newVideos) {
+        const videoInfo: VideoInfo = {
+          url: `https://www.youtube.com/watch?v=${video.videoId}`,
+          videoId: video.videoId,
+          platform: 'youtube',
+          title: video.title,
+          duration: video.duration,
+          channelId: video.channelId,
+          channelTitle: channel?.title,
+        };
+
+        const result = await startJob({
+          videoInfo,
+          promptId,
+          forceRegenerate: false,
+        });
+
+        results.push({
+          videoId: video.videoId,
+          jobId: result.jobId,
+          error: result.error,
+        });
+      }
+
+      return { type: 'BATCH_TRANSCRIBE_RESPONSE', payload: results };
+    }
+
+    case 'CANCEL_JOB': {
+      const { jobId } = message.payload as { jobId: string };
+      await cancelRunningJob(jobId);
+      return { type: 'JOB_RESPONSE', payload: { canceled: true } };
+    }
+
+    case 'BACKFILL_CHANNEL_IDS': {
+      const settings = await storage.getSettings();
+      if (!settings.youtubeApiKey) {
+        return { error: 'YouTube API key not configured' };
+      }
+
+      const jobsMissing = await jobStore.getJobsMissingChannelId();
+      if (jobsMissing.length === 0) {
+        return { type: 'CHANNEL_UPDATED', payload: { backfilled: 0 } };
+      }
+
+      const uniqueVideoIds = [...new Set(jobsMissing.map((job) => job.videoId))];
+      const detailsMap = await fetchVideoDetailsBatch(uniqueVideoIds, settings.youtubeApiKey);
+
+      const updates: Array<{ jobId: string; channelId: string; channelTitle: string }> = [];
+      for (const job of jobsMissing) {
+        const details = detailsMap.get(job.videoId);
+        if (details?.channelId) {
+          updates.push({
+            jobId: job.jobId,
+            channelId: details.channelId,
+            channelTitle: details.channelTitle,
+          });
+        }
+      }
+
+      await jobStore.bulkUpdateChannelIds(updates);
+      return { type: 'CHANNEL_UPDATED', payload: { backfilled: updates.length } };
+    }
+
+    default:
+      return null;
   }
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
-  await ensureInitialized();
+  await ensureBackgroundInitialized();
   await scheduleDailyChannelRefresh();
   console.debug('[Media Summarizer] Extension installed and initialized');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  await ensureInitialized();
+  await ensureBackgroundInitialized();
   await scheduleDailyChannelRefresh();
 });
 
@@ -824,7 +455,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
     return;
   }
 
-  void ensureInitialized()
+  void ensureBackgroundInitialized()
     .then(() => storage.getSettings())
     .then((settings) => refreshAllTrackedChannels(settings))
     .catch((error) => {
@@ -834,431 +465,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.runtime.onMessage.addListener(
   (message: Message | { type: string; payload?: unknown }, _sender, sendResponse) => {
-    const handleMessage = async () => {
-      await ensureInitialized();
-
-      switch (message.type) {
-        case 'GET_VIDEO_INFO': {
-          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-          if (tabs[0]?.id) {
-            const videoInfo = await getVideoInfoFromTab(tabs[0].id);
-            if (videoInfo && videoInfo.platform === 'youtube') {
-              const settings = await storage.getSettings();
-              if (settings.youtubeApiKey) {
-                const details = await fetchVideoDetails(videoInfo.videoId, settings.youtubeApiKey);
-                if (details) {
-                  videoInfo.categoryId = details.categoryId;
-                  videoInfo.categoryName = details.categoryName;
-                  videoInfo.title = details.title || videoInfo.title;
-                  videoInfo.channelId = details.channelId;
-                  videoInfo.channelTitle = details.channelTitle;
-                  if (details.duration) {
-                    videoInfo.duration = details.duration;
-                  }
-                }
-              }
-            }
-            return { type: 'VIDEO_INFO_RESPONSE', payload: videoInfo };
-          }
-          return { type: 'VIDEO_INFO_RESPONSE', payload: null };
-        }
-
-        case 'SUMMARIZE':
-        case 'START_JOB': {
-          const request = message.payload as StartJobRequest;
-          const result = await startJob(request);
-          return { type: 'SUMMARIZE_RESPONSE', payload: result };
-        }
-
-        case 'GET_SETTINGS': {
-          const settings = await storage.getSettings();
-          return { type: 'SETTINGS_RESPONSE', payload: settings };
-        }
-
-        case 'SAVE_SETTINGS': {
-          const settings = message.payload as ExtensionSettings;
-          await storage.saveSettings(settings);
-          await scheduleDailyChannelRefresh(settings);
-          return { type: 'SETTINGS_RESPONSE', payload: settings };
-        }
-
-        case 'GET_PROMPTS': {
-          const prompts = await storage.getPrompts();
-          return { type: 'PROMPTS_RESPONSE', payload: prompts };
-        }
-
-        case 'SAVE_PROMPTS': {
-          const prompts = message.payload as PromptTemplate[];
-          await storage.savePrompts(prompts);
-          return { type: 'PROMPTS_RESPONSE', payload: prompts };
-        }
-
-        case 'RESET_DEFAULTS': {
-          await storage.resetToDefaults();
-          const allData = await storage.getAllData();
-          return { type: 'SETTINGS_RESPONSE', payload: allData };
-        }
-
-        case 'TEST_API_KEY': {
-          const apiKey = message.payload as string;
-          const isValid = await testApiKey(apiKey);
-          return { type: 'API_KEY_TEST_RESULT', payload: isValid };
-        }
-
-        case 'GET_CACHED_SUMMARY': {
-          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-          const cached = await storage.getCachedSummary(videoId, platform);
-          return { type: 'CACHED_SUMMARY_RESPONSE', payload: cached };
-        }
-
-        case 'CLEAR_CACHED_SUMMARY': {
-          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-          await storage.clearCachedSummary(videoId, platform);
-          return { type: 'CACHED_SUMMARY_RESPONSE', payload: null };
-        }
-
-        case 'GET_ALL_CACHED_SUMMARIES': {
-          const summaries = await storage.getAllCachedSummaries();
-          return { type: 'CACHED_SUMMARY_RESPONSE', payload: summaries };
-        }
-
-        case 'CHECK_IN_PROGRESS': {
-          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-          const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
-          const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
-          return {
-            type: 'IN_PROGRESS_RESPONSE',
-            payload: {
-              inProgress: Boolean(activeJob && activeJob.status === 'RUNNING'),
-              startTime: activeJob?.startedAt,
-              promptId: activeJob?.promptId,
-              jobId: activeJob?.jobId,
-            },
-          };
-        }
-
-        case 'GET_ACTIVE_JOB': {
-          const { videoId, platform } = message.payload as { videoId: string; platform: Platform };
-          const timeoutMs = (await storage.getSettings()).summarizationTimeoutMinutes * 60 * 1000;
-          const activeJob = await getFreshActiveJob(videoId, platform, timeoutMs);
-          return { type: 'ACTIVE_JOB_RESPONSE', payload: activeJob };
-        }
-
-        case 'GET_JOB': {
-          const { jobId } = message.payload as { jobId: string };
-          const job = await jobStore.getJob(jobId);
-          return { type: 'JOB_RESPONSE', payload: job };
-        }
-
-        case 'LIST_JOBS': {
-          const query = (message.payload || {}) as JobListQuery;
-          const jobs = await jobStore.listJobs(query);
-          return { type: 'LIST_JOBS_RESPONSE', payload: jobs };
-        }
-
-        case 'UPDATE_JOB_EDITED_TEXT': {
-          const payload = message.payload as { jobId: string; editedText: string };
-          const job = await jobStore.updateEditedText(payload.jobId, payload.editedText);
-          if (job) {
-            notifyJobUpdated(job.jobId);
-          }
-          return { type: 'JOB_RESPONSE', payload: job };
-        }
-
-        case 'DELETE_JOB': {
-          const payload = message.payload as { jobId: string };
-          const deleted = await jobStore.deleteJob(payload.jobId);
-          return { type: 'JOB_RESPONSE', payload: { deleted } };
-        }
-
-        case 'CLEAR_ALL_JOBS': {
-          await jobStore.clearAllJobs();
-          return { type: 'JOB_RESPONSE', payload: { success: true } };
-        }
-
-        case 'ADD_CHANNEL': {
-          const payload = message.payload as { videoId?: string; channelId?: string };
-          const settings = await storage.getSettings();
-          if (!settings.youtubeApiKey) {
-            return { error: 'YouTube API key not configured' };
-          }
-
-          let channelId = payload.channelId;
-
-          // If we have a videoId, look up its channel
-          if (!channelId && payload.videoId) {
-            const details = await fetchVideoDetails(payload.videoId, settings.youtubeApiKey);
-            if (!details) {
-              return { error: 'Could not find video details' };
-            }
-            channelId = details.channelId;
-          }
-
-          if (!channelId) {
-            return { error: 'No channel ID provided or resolved' };
-          }
-
-          // Check if already added
-          const existing = await jobStore.getChannel(channelId);
-          if (existing) {
-            if (isSubscribedChannel(existing)) {
-              return { type: 'CHANNEL_UPDATED', payload: existing };
-            }
-
-            const upgradedChannel = await syncChannelCatalog(channelId, settings, true);
-            return { type: 'CHANNEL_UPDATED', payload: upgradedChannel };
-          }
-          const channel = await syncChannelCatalog(channelId, settings, true);
-          return { type: 'CHANNEL_UPDATED', payload: channel };
-        }
-
-        case 'REMOVE_CHANNEL': {
-          const { channelId } = message.payload as { channelId: string };
-          await jobStore.removeChannel(channelId);
-          return { type: 'CHANNEL_UPDATED', payload: { removed: true, channelId } };
-        }
-
-        case 'LIST_CHANNELS': {
-          const channels = await jobStore.listChannels();
-          const channelsWithCounts = await Promise.all(
-            channels.map(async (ch) => {
-              const videos = await jobStore.listChannelVideos(ch.channelId);
-              const videoIds = videos.map((v) => v.videoId);
-              const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
-              const newCount = videos.filter((v) => isChannelVideoNew(ch, v, succeededIds)).length;
-              return {
-                ...ch,
-                subscribed: isSubscribedChannel(ch),
-                newCount,
-                totalCount: videos.length,
-              };
-            })
-          );
-
-          // Merge discovered channels from existing jobs
-          const discovered = await jobStore.getDiscoveredChannels();
-          if (discovered.size > 0) {
-            // Batch-fetch thumbnails for discovered channels
-            const settings = await storage.getSettings();
-            const discoveredIds = [...discovered.keys()];
-            const thumbs = settings.youtubeApiKey
-              ? await fetchChannelThumbnails(discoveredIds, settings.youtubeApiKey)
-              : new Map<string, string>();
-
-            for (const [, entry] of discovered) {
-              channelsWithCounts.push({
-                channelId: entry.channelId,
-                title: entry.channelTitle,
-                thumbnailUrl: thumbs.get(entry.channelId),
-                uploadsPlaylistId: '',
-                addedAt: 0,
-                subscribed: false,
-                newCount: 0,
-                totalCount: entry.videoIds.size,
-              });
-            }
-          }
-
-          return { type: 'LIST_CHANNELS_RESPONSE', payload: channelsWithCounts };
-        }
-
-        case 'FETCH_CHANNEL_VIDEOS': {
-          const { channelId } = message.payload as { channelId: string };
-          const channel = await jobStore.getChannel(channelId);
-          if (!channel) {
-            return { error: 'Channel not found' };
-          }
-
-          const settings = await storage.getSettings();
-          if (!settings.youtubeApiKey) {
-            return { error: 'YouTube API key not configured' };
-          }
-          await syncChannelCatalog(channelId, settings, isSubscribedChannel(channel));
-
-          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: { success: true } };
-        }
-
-        case 'REFRESH_ALL_CHANNELS': {
-          const settings = await storage.getSettings();
-          const { refreshedCount, failedCount } = await refreshAllTrackedChannels(settings);
-
-          return {
-            type: 'CHANNEL_UPDATED',
-            payload: { refreshedCount, failedCount },
-          };
-        }
-
-        case 'LIST_CHANNEL_VIDEOS': {
-          const { channelId } = message.payload as { channelId: string };
-          const channel = await jobStore.getChannel(channelId);
-          const storedVideos = await jobStore.listChannelVideos(channelId);
-
-          if (channel || storedVideos.length > 0) {
-            const videoIds = storedVideos.map((v) => v.videoId);
-            const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
-            const runningIds = await jobStore.getRunningVideoIds(videoIds);
-            const failedIds = await jobStore.getFailedVideoIds(videoIds);
-
-            const annotated = storedVideos.map((v) => ({
-              ...v,
-              hasTranscription: succeededIds.has(v.videoId),
-              isRunning: runningIds.has(v.videoId),
-              isFailed: failedIds.has(v.videoId) && !succeededIds.has(v.videoId),
-              isNew: isChannelVideoNew(channel || { addedAt: 0 }, v, succeededIds),
-            }));
-            return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
-          }
-
-          // Discovered channel — build video list from jobs
-          const channelJobs = await jobStore.listJobsByChannel(channelId);
-          const videoMap = new Map<
-            string,
-            { job: Job; hasTranscription: boolean; isRunning: boolean; isFailed: boolean }
-          >();
-          for (const job of channelJobs) {
-            const existing = videoMap.get(job.videoId);
-            const succeeded = job.status === 'SUCCEEDED';
-            const running = job.status === 'RUNNING';
-            const failed = job.status === 'FAILED';
-            if (!existing) {
-              videoMap.set(job.videoId, {
-                job,
-                hasTranscription: succeeded,
-                isRunning: running,
-                isFailed: failed,
-              });
-            } else {
-              if (succeeded) existing.hasTranscription = true;
-              if (running) existing.isRunning = true;
-              if (failed) existing.isFailed = true;
-            }
-          }
-
-          const annotated = Array.from(videoMap.values()).map(
-            ({ job, hasTranscription, isRunning, isFailed }) => ({
-              videoId: job.videoId,
-              channelId: job.channelId || channelId,
-              title: job.videoTitle,
-              thumbnailUrl: job.thumbnailUrl,
-              publishedAt: job.createdAt,
-              duration: undefined as string | undefined,
-              ignored: false,
-              discoveredAt: job.createdAt,
-              hasTranscription,
-              isRunning: isRunning && !hasTranscription,
-              isFailed: isFailed && !hasTranscription,
-              isNew: false,
-            })
-          );
-
-          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
-        }
-
-        case 'IGNORE_VIDEO': {
-          const { videoId, ignored } = message.payload as { videoId: string; ignored: boolean };
-          const updated = await jobStore.setVideoIgnored(videoId, ignored);
-          if (updated) {
-            notifyChannelUpdated(updated.channelId);
-          }
-          return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: updated };
-        }
-
-        case 'BATCH_TRANSCRIBE': {
-          const { channelId, promptId } = message.payload as {
-            channelId: string;
-            promptId: string;
-          };
-          const videos = await jobStore.listChannelVideos(channelId);
-          const videoIds = videos.map((v) => v.videoId);
-          const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
-          const channel = await jobStore.getChannel(channelId);
-
-          const newVideos = videos.filter((v) =>
-            isChannelVideoNew(channel || { addedAt: 0 }, v, succeededIds)
-          );
-
-          const results: Array<{ videoId: string; jobId?: string; error?: string }> = [];
-
-          for (const video of newVideos) {
-            const videoInfo: VideoInfo = {
-              url: `https://www.youtube.com/watch?v=${video.videoId}`,
-              videoId: video.videoId,
-              platform: 'youtube',
-              title: video.title,
-              duration: video.duration,
-              channelId: video.channelId,
-              channelTitle: channel?.title,
-            };
-
-            const result = await startJob({
-              videoInfo,
-              promptId,
-              forceRegenerate: false,
-            });
-
-            results.push({
-              videoId: video.videoId,
-              jobId: result.jobId,
-              error: result.error,
-            });
-          }
-
-          return { type: 'BATCH_TRANSCRIBE_RESPONSE', payload: results };
-        }
-
-        case 'CANCEL_JOB': {
-          const { jobId } = message.payload as { jobId: string };
-          const controller = runningControllers.get(jobId);
-          if (controller) {
-            controller.abort();
-          } else {
-            // Job already finished or controller gone — mark CANCELED as fallback
-            const job = await jobStore.getJob(jobId);
-            if (job && job.status === 'RUNNING') {
-              await jobStore.completeJob(jobId, { status: 'CANCELED' });
-              notifyJobUpdated(jobId);
-            }
-          }
-          return { type: 'JOB_RESPONSE', payload: { canceled: true } };
-        }
-
-        case 'BACKFILL_CHANNEL_IDS': {
-          const settings = await storage.getSettings();
-          if (!settings.youtubeApiKey) {
-            return { error: 'YouTube API key not configured' };
-          }
-
-          const jobsMissing = await jobStore.getJobsMissingChannelId();
-          if (jobsMissing.length === 0) {
-            return { type: 'CHANNEL_UPDATED', payload: { backfilled: 0 } };
-          }
-
-          // Deduplicate videoIds
-          const uniqueVideoIds = [...new Set(jobsMissing.map((j) => j.videoId))];
-          const detailsMap = await fetchVideoDetailsBatch(uniqueVideoIds, settings.youtubeApiKey);
-
-          const updates: Array<{ jobId: string; channelId: string; channelTitle: string }> = [];
-          for (const job of jobsMissing) {
-            const details = detailsMap.get(job.videoId);
-            if (details?.channelId) {
-              updates.push({
-                jobId: job.jobId,
-                channelId: details.channelId,
-                channelTitle: details.channelTitle,
-              });
-            }
-          }
-
-          await jobStore.bulkUpdateChannelIds(updates);
-          return { type: 'CHANNEL_UPDATED', payload: { backfilled: updates.length } };
-        }
-
-        default:
-          return null;
-      }
-    };
-
-    handleMessage()
+    handleMessage(message)
       .then(sendResponse)
       .catch((error) => {
         console.error('[Media Summarizer] Message handler error:', error);
