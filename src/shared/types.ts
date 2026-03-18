@@ -11,6 +11,7 @@ export interface ExtensionSettings {
   youtubeApiKey: string;
   defaultPromptId: string;
   autoDetectCategory: boolean;
+  autoRefreshChannelsDaily: boolean;
   streamResponse: boolean;
   theme: 'light' | 'dark' | 'system';
   summarizationTimeoutMinutes: number;
@@ -41,6 +42,7 @@ export interface Channel {
   uploadsPlaylistId: string;
   addedAt: number;
   lastFetchedAt?: number;
+  newVideosSinceAt?: number;
   subscribed?: boolean;
 }
 

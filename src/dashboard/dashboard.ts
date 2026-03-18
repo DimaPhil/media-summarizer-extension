@@ -1,11 +1,6 @@
-import type {
-  Job,
-  StartJobRequest,
-  SummarizationResult,
-  VideoInfo,
-  PromptTemplate,
-} from '../shared/types';
+import type { Job, StartJobRequest, VideoInfo, PromptTemplate } from '../shared/types';
 import { PLATFORM_PATTERNS } from '../shared/constants';
+import { sendRuntimeMessage, startJobWithRuntimeFallback } from '../shared/runtime';
 import './dashboard.css';
 
 // ── Types for channel responses ──
@@ -101,40 +96,6 @@ let channelVideos: AnnotatedChannelVideo[] = [];
 let prompts: PromptTemplate[] = [];
 
 // ── Messaging ──
-
-async function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type, payload }, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-
-      if (response && typeof response === 'object' && 'error' in response && response.error) {
-        reject(new Error(String(response.error)));
-        return;
-      }
-
-      resolve(response && 'payload' in response ? response.payload : response);
-    });
-  });
-}
-
-async function startJobWithFallback(request: StartJobRequest): Promise<SummarizationResult> {
-  const primary = await sendMessage<SummarizationResult | null>('START_JOB', request).catch(
-    () => null
-  );
-  if (primary) {
-    return primary;
-  }
-
-  const fallback = await sendMessage<SummarizationResult | null>('SUMMARIZE', request);
-  if (!fallback) {
-    throw new Error('No response from background job runner');
-  }
-
-  return fallback;
-}
 
 // ── Utilities ──
 
@@ -245,7 +206,7 @@ async function backfillThenLoadChannels(): Promise<void> {
   if (!backfillDone) {
     backfillDone = true;
     try {
-      await sendMessage('BACKFILL_CHANNEL_IDS');
+      await sendRuntimeMessage('BACKFILL_CHANNEL_IDS');
     } catch {
       // No YouTube API key or network issue — continue anyway
     }
@@ -344,7 +305,7 @@ function renderDetail(job: Job | null): void {
 }
 
 async function loadJobs(): Promise<void> {
-  jobs = await sendMessage<Job[]>('LIST_JOBS', { limit: 1000 });
+  jobs = await sendRuntimeMessage<Job[]>('LIST_JOBS', { limit: 1000 });
   jobs.sort((a, b) => b.createdAt - a.createdAt);
 
   if (!selectedJobId && jobs.length) {
@@ -356,7 +317,7 @@ async function loadJobs(): Promise<void> {
 }
 
 async function refreshSingleJob(jobId: string): Promise<void> {
-  const updated = await sendMessage<Job | null>('GET_JOB', { jobId });
+  const updated = await sendRuntimeMessage<Job | null>('GET_JOB', { jobId });
   if (!updated) {
     jobs = jobs.filter((job) => job.jobId !== jobId);
     if (selectedJobId === jobId) {
@@ -387,7 +348,7 @@ async function saveEditedText(): Promise<void> {
   if (!job) return;
 
   const editedText = elements.editedText.value;
-  const updated = await sendMessage<Job | null>('UPDATE_JOB_EDITED_TEXT', {
+  const updated = await sendRuntimeMessage<Job | null>('UPDATE_JOB_EDITED_TEXT', {
     jobId: job.jobId,
     editedText,
   });
@@ -424,7 +385,7 @@ async function restartJob(): Promise<void> {
     forceRegenerate: true,
   };
 
-  const result = await startJobWithFallback(request);
+  const result = await startJobWithRuntimeFallback(request);
 
   if (result.jobId) {
     selectedJobId = result.jobId;
@@ -448,7 +409,7 @@ async function deleteSelectedJob(): Promise<void> {
   const confirmed = confirm('Delete this job from history?');
   if (!confirmed) return;
 
-  await sendMessage('DELETE_JOB', { jobId: job.jobId });
+  await sendRuntimeMessage('DELETE_JOB', { jobId: job.jobId });
   jobs = jobs.filter((item) => item.jobId !== job.jobId);
   selectedJobId = jobs[0]?.jobId || null;
   renderJobsList();
@@ -460,7 +421,7 @@ async function cancelSelectedJob(): Promise<void> {
   const job = findJob(selectedJobId);
   if (!job || job.status !== 'RUNNING') return;
 
-  await sendMessage('CANCEL_JOB', { jobId: job.jobId });
+  await sendRuntimeMessage('CANCEL_JOB', { jobId: job.jobId });
   await refreshSingleJob(job.jobId);
   showToast('Job canceled');
 }
@@ -469,7 +430,7 @@ async function clearAllJobs(): Promise<void> {
   const confirmed = confirm('Clear all history? This cannot be undone.');
   if (!confirmed) return;
 
-  await sendMessage('CLEAR_ALL_JOBS');
+  await sendRuntimeMessage('CLEAR_ALL_JOBS');
   jobs = [];
   selectedJobId = null;
   renderJobsList();
@@ -484,7 +445,7 @@ function togglePromptView(): void {
 // ── Channels tab ──
 
 async function loadPrompts(): Promise<void> {
-  prompts = await sendMessage<PromptTemplate[]>('GET_PROMPTS');
+  prompts = await sendRuntimeMessage<PromptTemplate[]>('GET_PROMPTS');
   renderPromptSelect();
 }
 
@@ -498,7 +459,7 @@ function renderPromptSelect(): void {
 }
 
 async function loadChannels(): Promise<void> {
-  channels = await sendMessage<ChannelWithCounts[]>('LIST_CHANNELS');
+  channels = await sendRuntimeMessage<ChannelWithCounts[]>('LIST_CHANNELS');
   renderChannelsList();
 }
 
@@ -618,7 +579,9 @@ function stopChannelPoll(): void {
 }
 
 async function loadChannelVideos(channelId: string): Promise<void> {
-  channelVideos = await sendMessage<AnnotatedChannelVideo[]>('LIST_CHANNEL_VIDEOS', { channelId });
+  channelVideos = await sendRuntimeMessage<AnnotatedChannelVideo[]>('LIST_CHANNEL_VIDEOS', {
+    channelId,
+  });
   renderChannelVideos();
   startChannelPollIfNeeded();
 }
@@ -820,7 +783,7 @@ async function transcribeSingleVideo(videoId: string, forceRegenerate = false): 
   };
 
   try {
-    const result = await startJobWithFallback({
+    const result = await startJobWithRuntimeFallback({
       videoInfo,
       promptId,
       forceRegenerate,
@@ -855,13 +818,13 @@ async function transcribeSingleVideo(videoId: string, forceRegenerate = false): 
 
 async function cancelChannelVideo(videoId: string): Promise<void> {
   // Find the running job for this video
-  const activeJob = await sendMessage<Job | null>('GET_ACTIVE_JOB', {
+  const activeJob = await sendRuntimeMessage<Job | null>('GET_ACTIVE_JOB', {
     videoId,
     platform: 'youtube',
   });
 
   if (activeJob && activeJob.status === 'RUNNING') {
-    await sendMessage('CANCEL_JOB', { jobId: activeJob.jobId });
+    await sendRuntimeMessage('CANCEL_JOB', { jobId: activeJob.jobId });
   }
 
   if (selectedChannelId) {
@@ -871,7 +834,7 @@ async function cancelChannelVideo(videoId: string): Promise<void> {
 }
 
 async function toggleIgnore(videoId: string, ignored: boolean): Promise<void> {
-  await sendMessage('IGNORE_VIDEO', { videoId, ignored });
+  await sendRuntimeMessage('IGNORE_VIDEO', { videoId, ignored });
   if (selectedChannelId) {
     await loadChannelVideos(selectedChannelId);
   }
@@ -896,7 +859,7 @@ async function batchTranscribe(): Promise<void> {
   elements.batchTranscribeBtn.textContent = 'Starting...';
 
   try {
-    await sendMessage('BATCH_TRANSCRIBE', {
+    await sendRuntimeMessage('BATCH_TRANSCRIBE', {
       channelId: selectedChannelId,
       promptId,
     });
@@ -923,7 +886,7 @@ async function refreshChannelVideos(): Promise<void> {
   elements.refreshVideosBtn.textContent = 'Refreshing...';
 
   try {
-    await sendMessage('FETCH_CHANNEL_VIDEOS', { channelId: selectedChannelId });
+    await sendRuntimeMessage('FETCH_CHANNEL_VIDEOS', { channelId: selectedChannelId });
     await loadChannelVideos(selectedChannelId);
     showToast('Videos refreshed');
   } catch (error) {
@@ -939,7 +902,7 @@ async function refreshAllChannels(): Promise<void> {
   elements.refreshAllChannelsBtn.textContent = 'Refreshing...';
 
   try {
-    const result = await sendMessage<{ refreshedCount: number; failedCount: number }>(
+    const result = await sendRuntimeMessage<{ refreshedCount: number; failedCount: number }>(
       'REFRESH_ALL_CHANNELS'
     );
     await loadChannels();
@@ -970,7 +933,7 @@ async function subscribeChannel(): Promise<void> {
   elements.subscribeChannelBtn.textContent = 'Subscribing...';
 
   try {
-    await sendMessage('ADD_CHANNEL', { channelId: selectedChannelId });
+    await sendRuntimeMessage('ADD_CHANNEL', { channelId: selectedChannelId });
     showToast('Channel subscribed');
     // Reload channels list and reopen detail with full capabilities
     await loadChannels();
@@ -989,7 +952,7 @@ async function removeChannel(): Promise<void> {
   const confirmed = confirm('Remove this channel? Jobs will be kept in history.');
   if (!confirmed) return;
 
-  await sendMessage('REMOVE_CHANNEL', { channelId: selectedChannelId });
+  await sendRuntimeMessage('REMOVE_CHANNEL', { channelId: selectedChannelId });
   showToast('Channel removed');
   closeChannelDetail();
 }
@@ -1047,7 +1010,7 @@ async function addChannel(): Promise<void> {
   elements.channelInputError.classList.add('hidden');
 
   try {
-    await sendMessage('ADD_CHANNEL', parsed);
+    await sendRuntimeMessage('ADD_CHANNEL', parsed);
     closeAddChannelModal();
     await loadChannels();
     showToast('Channel added');

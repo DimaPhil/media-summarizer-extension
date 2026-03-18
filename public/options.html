@@ -81,6 +81,14 @@
         </div>
 
         <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="auto-refresh-channels-daily">
+            <span>Refresh tracked channels once a day automatically</span>
+          </label>
+          <p class="hint">Runs around 9:00 AM local time using the extension background worker</p>
+        </div>
+
+        <div class="form-group">
           <label for="timeout-minutes">Summarization Timeout</label>
           <div class="input-row input-row-compact">
             <input type="number" id="timeout-minutes" min="1" max="30" value="5">

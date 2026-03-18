@@ -1,6 +1,7 @@
 import type { ExtensionSettings, PromptTemplate, StorageData } from '../shared/types';
 import { DEFAULT_SETTINGS, GEMINI_MODELS } from '../shared/constants';
 import { DEFAULT_PROMPTS } from '../lib/prompts';
+import { sendRuntimeMessage } from '../shared/runtime';
 import './options.css';
 
 const elements = {
@@ -15,6 +16,9 @@ const elements = {
   geminiModel: document.getElementById('gemini-model') as HTMLSelectElement,
   defaultPrompt: document.getElementById('default-prompt') as HTMLSelectElement,
   autoDetectCategory: document.getElementById('auto-detect-category') as HTMLInputElement,
+  autoRefreshChannelsDaily: document.getElementById(
+    'auto-refresh-channels-daily'
+  ) as HTMLInputElement,
   streamResponse: document.getElementById('stream-response') as HTMLInputElement,
   timeoutMinutes: document.getElementById('timeout-minutes') as HTMLInputElement,
   promptsList: document.getElementById('prompts-list') as HTMLElement,
@@ -35,14 +39,6 @@ const elements = {
 let currentSettings: ExtensionSettings = { ...DEFAULT_SETTINGS };
 let currentPrompts: PromptTemplate[] = [...DEFAULT_PROMPTS];
 let editingPromptId: string | null = null;
-
-async function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type, payload }, (response) => {
-      resolve(response && 'payload' in response ? response.payload : response);
-    });
-  });
-}
 
 function showToast(message: string, duration = 3000): void {
   elements.toastMessage.textContent = message;
@@ -126,6 +122,7 @@ function loadSettingsToForm(): void {
   elements.geminiApiKey.value = currentSettings.geminiApiKey;
   elements.youtubeApiKey.value = currentSettings.youtubeApiKey;
   elements.autoDetectCategory.checked = currentSettings.autoDetectCategory;
+  elements.autoRefreshChannelsDaily.checked = currentSettings.autoRefreshChannelsDaily;
   elements.streamResponse.checked = currentSettings.streamResponse;
   elements.timeoutMinutes.value = String(currentSettings.summarizationTimeoutMinutes || 5);
   renderModelOptions();
@@ -141,6 +138,7 @@ function getSettingsFromForm(): ExtensionSettings {
     youtubeApiKey: elements.youtubeApiKey.value.trim(),
     defaultPromptId: elements.defaultPrompt.value,
     autoDetectCategory: elements.autoDetectCategory.checked,
+    autoRefreshChannelsDaily: elements.autoRefreshChannelsDaily.checked,
     streamResponse: elements.streamResponse.checked,
     theme: currentSettings.theme,
     summarizationTimeoutMinutes: timeoutMinutes,
@@ -231,7 +229,7 @@ async function testApiKey(): Promise<void> {
   elements.geminiTestResult.classList.add('hidden');
 
   try {
-    const isValid = await sendMessage<boolean>('TEST_API_KEY', apiKey);
+    const isValid = await sendRuntimeMessage<boolean>('TEST_API_KEY', apiKey);
 
     elements.geminiTestResult.classList.remove('hidden', 'success', 'error');
     if (isValid) {
@@ -289,48 +287,60 @@ async function testYoutubeApiKey(): Promise<void> {
 }
 
 async function saveAllSettings(): Promise<void> {
-  const settings = getSettingsFromForm();
+  try {
+    const settings = getSettingsFromForm();
 
-  await sendMessage<ExtensionSettings>('SAVE_SETTINGS', settings);
-  await sendMessage<PromptTemplate[]>('SAVE_PROMPTS', currentPrompts);
+    await sendRuntimeMessage<ExtensionSettings>('SAVE_SETTINGS', settings);
+    await sendRuntimeMessage<PromptTemplate[]>('SAVE_PROMPTS', currentPrompts);
 
-  currentSettings = settings;
-  showToast('Settings saved');
+    currentSettings = settings;
+    showToast('Settings saved');
+  } catch (error) {
+    showToast(`Failed to save settings: ${String(error)}`);
+  }
 }
 
 async function resetToDefaults(): Promise<void> {
   if (!confirm('Reset all settings and prompts to defaults?')) return;
 
-  currentSettings = { ...DEFAULT_SETTINGS };
-  currentPrompts = [...DEFAULT_PROMPTS];
+  try {
+    currentSettings = { ...DEFAULT_SETTINGS };
+    currentPrompts = [...DEFAULT_PROMPTS];
 
-  const data = await sendMessage<StorageData>('RESET_DEFAULTS');
-  if (data?.settings && data?.prompts) {
-    currentSettings = data.settings;
-    currentPrompts = data.prompts;
+    const data = await sendRuntimeMessage<StorageData>('RESET_DEFAULTS');
+    if (data?.settings && data?.prompts) {
+      currentSettings = data.settings;
+      currentPrompts = data.prompts;
+    }
+
+    loadSettingsToForm();
+    renderPrompts();
+    showToast('Reset to defaults');
+  } catch (error) {
+    showToast(`Failed to reset settings: ${String(error)}`);
   }
-
-  loadSettingsToForm();
-  renderPrompts();
-  showToast('Reset to defaults');
 }
 
 async function initialize(): Promise<void> {
-  const [settings, prompts] = await Promise.all([
-    sendMessage<ExtensionSettings>('GET_SETTINGS'),
-    sendMessage<PromptTemplate[]>('GET_PROMPTS'),
-  ]);
+  try {
+    const [settings, prompts] = await Promise.all([
+      sendRuntimeMessage<ExtensionSettings>('GET_SETTINGS'),
+      sendRuntimeMessage<PromptTemplate[]>('GET_PROMPTS'),
+    ]);
 
-  if (settings) {
-    currentSettings = { ...DEFAULT_SETTINGS, ...settings };
+    if (settings) {
+      currentSettings = { ...DEFAULT_SETTINGS, ...settings };
+    }
+
+    if (prompts?.length) {
+      currentPrompts = prompts;
+    }
+
+    loadSettingsToForm();
+    renderPrompts();
+  } catch (error) {
+    showToast(`Failed to load settings: ${String(error)}`);
   }
-
-  if (prompts?.length) {
-    currentPrompts = prompts;
-  }
-
-  loadSettingsToForm();
-  renderPrompts();
 }
 
 elements.toggleGeminiKey.addEventListener('click', () =>

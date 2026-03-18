@@ -12,7 +12,7 @@ import type {
 } from '../shared/types';
 import { ErrorCode, SummarizationError, ERROR_MESSAGES } from '../shared/errors';
 import { storage } from './storage';
-import { GeminiClient, resetGeminiClient } from './gemini-client';
+import { GeminiClient } from './gemini-client';
 import {
   fetchVideoDetails,
   fetchVideoDetailsBatch,
@@ -22,7 +22,6 @@ import {
   fetchChannelThumbnails,
 } from './youtube-api';
 import { getVideoKey, jobStore } from './job-store';
-import { NEW_VIDEO_CUTOFF_MS } from '../shared/constants';
 import type { Channel, ChannelVideo } from '../shared/types';
 
 const MAX_SINGLE_REQUEST_VIDEO_SEC = 55 * 60;
@@ -30,6 +29,9 @@ const DEFAULT_CHUNK_DURATION_SEC = 12 * 60;
 const DEFAULT_CHUNK_OVERLAP_SEC = 8;
 const RUNNING_HEARTBEAT_MS = 10 * 1000;
 const STALE_JOB_THRESHOLD_MS = 45 * 1000;
+const DAILY_CHANNEL_REFRESH_ALARM = 'daily-channel-refresh';
+const DAILY_CHANNEL_REFRESH_PERIOD_MINUTES = 24 * 60;
+const DAILY_CHANNEL_REFRESH_HOUR_LOCAL = 9;
 
 const runningControllers = new Map<string, AbortController>();
 
@@ -57,6 +59,37 @@ function isSubscribedChannel(channel: Channel | null | undefined): boolean {
   return channel?.subscribed !== false;
 }
 
+function isChannelVideoNew(
+  channel: Pick<Channel, 'addedAt' | 'newVideosSinceAt'>,
+  video: ChannelVideo,
+  succeededIds: Set<string>
+): boolean {
+  const baseline = channel.newVideosSinceAt ?? channel.addedAt;
+  return video.publishedAt > baseline && !video.ignored && !succeededIds.has(video.videoId);
+}
+
+function getNextDailyRefreshTime(base = new Date()): number {
+  const next = new Date(base);
+  next.setHours(DAILY_CHANNEL_REFRESH_HOUR_LOCAL, 0, 0, 0);
+  if (next.getTime() <= base.getTime()) {
+    next.setDate(next.getDate() + 1);
+  }
+  return next.getTime();
+}
+
+async function scheduleDailyChannelRefresh(settings?: ExtensionSettings): Promise<void> {
+  const currentSettings = settings ?? (await storage.getSettings());
+  if (!currentSettings.autoRefreshChannelsDaily || !currentSettings.youtubeApiKey) {
+    await chrome.alarms.clear(DAILY_CHANNEL_REFRESH_ALARM);
+    return;
+  }
+
+  chrome.alarms.create(DAILY_CHANNEL_REFRESH_ALARM, {
+    when: getNextDailyRefreshTime(),
+    periodInMinutes: DAILY_CHANNEL_REFRESH_PERIOD_MINUTES,
+  });
+}
+
 async function syncChannelCatalog(
   channelId: string,
   settings: ExtensionSettings,
@@ -80,6 +113,7 @@ async function syncChannelCatalog(
   const videoIds = playlistVideos.map((video) => video.videoId);
   const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
   const now = Date.now();
+  const previousLastFetchedAt = existing?.lastFetchedAt;
 
   const channel: Channel = {
     channelId: channelDetails.channelId,
@@ -91,6 +125,7 @@ async function syncChannelCatalog(
         ? now
         : (existing?.addedAt ?? now),
     lastFetchedAt: now,
+    newVideosSinceAt: previousLastFetchedAt ?? now,
     subscribed: subscribedOverride ?? existing?.subscribed ?? true,
   };
 
@@ -111,6 +146,43 @@ async function syncChannelCatalog(
   notifyChannelUpdated(channel.channelId);
 
   return channel;
+}
+
+async function refreshAllTrackedChannels(
+  settings: ExtensionSettings
+): Promise<{ refreshedCount: number; failedCount: number }> {
+  if (!settings.youtubeApiKey) {
+    throw new Error('YouTube API key not configured');
+  }
+
+  const storedChannels = await jobStore.listChannels();
+  const discoveredChannels = await jobStore.getDiscoveredChannels();
+  const refreshTargets = new Map<string, boolean>();
+
+  for (const channel of storedChannels) {
+    refreshTargets.set(channel.channelId, isSubscribedChannel(channel));
+  }
+
+  for (const [channelId] of discoveredChannels) {
+    if (!refreshTargets.has(channelId)) {
+      refreshTargets.set(channelId, false);
+    }
+  }
+
+  let refreshedCount = 0;
+  let failedCount = 0;
+
+  for (const [channelId, subscribed] of refreshTargets) {
+    try {
+      await syncChannelCatalog(channelId, settings, subscribed);
+      refreshedCount += 1;
+    } catch (error) {
+      failedCount += 1;
+      console.warn('Failed to refresh channel:', channelId, error);
+    }
+  }
+
+  return { refreshedCount, failedCount };
 }
 
 function isDurationOrContextError(error: unknown): boolean {
@@ -738,11 +810,26 @@ async function testApiKey(apiKey: string): Promise<boolean> {
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureInitialized();
+  await scheduleDailyChannelRefresh();
   console.debug('[Media Summarizer] Extension installed and initialized');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   await ensureInitialized();
+  await scheduleDailyChannelRefresh();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name !== DAILY_CHANNEL_REFRESH_ALARM) {
+    return;
+  }
+
+  void ensureInitialized()
+    .then(() => storage.getSettings())
+    .then((settings) => refreshAllTrackedChannels(settings))
+    .catch((error) => {
+      console.warn('[Media Summarizer] Daily channel refresh failed:', error);
+    });
 });
 
 chrome.runtime.onMessage.addListener(
@@ -791,6 +878,7 @@ chrome.runtime.onMessage.addListener(
         case 'SAVE_SETTINGS': {
           const settings = message.payload as ExtensionSettings;
           await storage.saveSettings(settings);
+          await scheduleDailyChannelRefresh(settings);
           return { type: 'SETTINGS_RESPONSE', payload: settings };
         }
 
@@ -937,10 +1025,7 @@ chrome.runtime.onMessage.addListener(
               const videos = await jobStore.listChannelVideos(ch.channelId);
               const videoIds = videos.map((v) => v.videoId);
               const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
-              const newCount = videos.filter(
-                (v) =>
-                  v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId)
-              ).length;
+              const newCount = videos.filter((v) => isChannelVideoNew(ch, v, succeededIds)).length;
               return {
                 ...ch,
                 subscribed: isSubscribedChannel(ch),
@@ -995,36 +1080,7 @@ chrome.runtime.onMessage.addListener(
 
         case 'REFRESH_ALL_CHANNELS': {
           const settings = await storage.getSettings();
-          if (!settings.youtubeApiKey) {
-            return { error: 'YouTube API key not configured' };
-          }
-
-          const storedChannels = await jobStore.listChannels();
-          const discoveredChannels = await jobStore.getDiscoveredChannels();
-          const refreshTargets = new Map<string, boolean>();
-
-          for (const channel of storedChannels) {
-            refreshTargets.set(channel.channelId, isSubscribedChannel(channel));
-          }
-
-          for (const [channelId] of discoveredChannels) {
-            if (!refreshTargets.has(channelId)) {
-              refreshTargets.set(channelId, false);
-            }
-          }
-
-          let refreshedCount = 0;
-          let failedCount = 0;
-
-          for (const [channelId, subscribed] of refreshTargets) {
-            try {
-              await syncChannelCatalog(channelId, settings, subscribed);
-              refreshedCount += 1;
-            } catch (error) {
-              failedCount += 1;
-              console.warn('Failed to refresh channel:', channelId, error);
-            }
-          }
+          const { refreshedCount, failedCount } = await refreshAllTrackedChannels(settings);
 
           return {
             type: 'CHANNEL_UPDATED',
@@ -1048,8 +1104,7 @@ chrome.runtime.onMessage.addListener(
               hasTranscription: succeededIds.has(v.videoId),
               isRunning: runningIds.has(v.videoId),
               isFailed: failedIds.has(v.videoId) && !succeededIds.has(v.videoId),
-              isNew:
-                v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId),
+              isNew: isChannelVideoNew(channel || { addedAt: 0 }, v, succeededIds),
             }));
             return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: annotated };
           }
@@ -1118,9 +1173,8 @@ chrome.runtime.onMessage.addListener(
           const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
           const channel = await jobStore.getChannel(channelId);
 
-          const newVideos = videos.filter(
-            (v) =>
-              v.publishedAt >= NEW_VIDEO_CUTOFF_MS && !v.ignored && !succeededIds.has(v.videoId)
+          const newVideos = videos.filter((v) =>
+            isChannelVideoNew(channel || { addedAt: 0 }, v, succeededIds)
           );
 
           const results: Array<{ videoId: string; jobId?: string; error?: string }> = [];
@@ -1215,8 +1269,8 @@ chrome.runtime.onMessage.addListener(
   }
 );
 
-chrome.storage.onChanged.addListener((changes) => {
-  if (changes.settings) {
-    resetGeminiClient();
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName === 'sync' && changes.settings?.newValue) {
+    void scheduleDailyChannelRefresh(changes.settings.newValue as ExtensionSettings);
   }
 });

@@ -2,12 +2,12 @@ import type {
   VideoInfo,
   PromptTemplate,
   ExtensionSettings,
-  SummarizationResult,
   CachedSummary,
   Job,
-  StartJobRequest,
+  SummarizationResult,
 } from '../shared/types';
 import { CATEGORY_TO_PROMPT } from '../shared/constants';
+import { sendRuntimeMessage, startJobWithRuntimeFallback } from '../shared/runtime';
 import './popup.css';
 
 const elements = {
@@ -41,40 +41,6 @@ let currentSettings: ExtensionSettings | null = null;
 let currentPrompts: PromptTemplate[] = [];
 let isLoading = false;
 let currentJobId: string | null = null;
-
-async function sendMessage<T>(type: string, payload?: unknown): Promise<T> {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ type, payload }, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message));
-        return;
-      }
-
-      if (response && typeof response === 'object' && 'error' in response && response.error) {
-        reject(new Error(String(response.error)));
-        return;
-      }
-
-      resolve(response && 'payload' in response ? response.payload : response);
-    });
-  });
-}
-
-async function startJobWithFallback(request: StartJobRequest): Promise<SummarizationResult> {
-  const primary = await sendMessage<SummarizationResult | null>('START_JOB', request).catch(
-    () => null
-  );
-  if (primary) {
-    return primary;
-  }
-
-  const fallback = await sendMessage<SummarizationResult | null>('SUMMARIZE', request);
-  if (!fallback) {
-    throw new Error('No response from background job runner');
-  }
-
-  return fallback;
-}
 
 function hideAllSections(): void {
   elements.noApiKey.classList.add('hidden');
@@ -186,7 +152,7 @@ function buildUnexpectedResultError(result: unknown): string {
 }
 
 async function loadJob(jobId: string): Promise<Job | null> {
-  const job = await sendMessage<Job | null>('GET_JOB', { jobId });
+  const job = await sendRuntimeMessage<Job | null>('GET_JOB', { jobId });
   return job;
 }
 
@@ -240,7 +206,7 @@ async function restoreLatestVideoState(): Promise<boolean> {
     return false;
   }
 
-  const activeJob = await sendMessage<Job | null>('GET_ACTIVE_JOB', {
+  const activeJob = await sendRuntimeMessage<Job | null>('GET_ACTIVE_JOB', {
     videoId: currentVideoInfo.videoId,
     platform: currentVideoInfo.platform,
   });
@@ -250,7 +216,7 @@ async function restoreLatestVideoState(): Promise<boolean> {
     return true;
   }
 
-  const jobs = await sendMessage<Job[]>('LIST_JOBS', { limit: 100 });
+  const jobs = await sendRuntimeMessage<Job[]>('LIST_JOBS', { limit: 100 });
   const latestFinishedForVideo = jobs.find(
     (job) =>
       job.videoId === currentVideoInfo?.videoId &&
@@ -267,8 +233,8 @@ async function restoreLatestVideoState(): Promise<boolean> {
 }
 
 async function initialize(): Promise<void> {
-  currentSettings = await sendMessage<ExtensionSettings>('GET_SETTINGS');
-  currentPrompts = await sendMessage<PromptTemplate[]>('GET_PROMPTS');
+  currentSettings = await sendRuntimeMessage<ExtensionSettings>('GET_SETTINGS');
+  currentPrompts = await sendRuntimeMessage<PromptTemplate[]>('GET_PROMPTS');
 
   if (!currentSettings?.geminiApiKey) {
     hideAllSections();
@@ -279,7 +245,7 @@ async function initialize(): Promise<void> {
   elements.autoDetect.checked = currentSettings.autoDetectCategory;
   renderPrompts(currentPrompts, currentSettings.defaultPromptId);
 
-  currentVideoInfo = await sendMessage<VideoInfo | null>('GET_VIDEO_INFO');
+  currentVideoInfo = await sendRuntimeMessage<VideoInfo | null>('GET_VIDEO_INFO');
 
   hideAllSections();
 
@@ -296,7 +262,7 @@ async function initialize(): Promise<void> {
     return;
   }
 
-  const cachedSummary = await sendMessage<CachedSummary | null>('GET_CACHED_SUMMARY', {
+  const cachedSummary = await sendRuntimeMessage<CachedSummary | null>('GET_CACHED_SUMMARY', {
     videoId: currentVideoInfo.videoId,
     platform: currentVideoInfo.platform,
   });
@@ -321,14 +287,14 @@ async function summarize(forceRegenerate = false): Promise<void> {
   showSection(elements.videoInfo);
   elements.cachedBadge.classList.add('hidden');
 
-  const request: StartJobRequest = {
+  const request = {
     videoInfo: currentVideoInfo,
     promptId: elements.promptSelect.value,
     forceRegenerate,
   };
 
   try {
-    const result = await startJobWithFallback(request);
+    const result = await startJobWithRuntimeFallback(request);
 
     if (result.cached && result.summary) {
       renderSummary(result.summary);
@@ -429,7 +395,7 @@ async function cancelJob(): Promise<void> {
   if (!currentJobId) return;
   elements.cancelBtn.disabled = true;
   try {
-    await sendMessage('CANCEL_JOB', { jobId: currentJobId });
+    await sendRuntimeMessage('CANCEL_JOB', { jobId: currentJobId });
     setLoading(false);
     setJobStatus('Canceled');
     elements.cancelBtn.classList.add('hidden');

@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   youtubeApiKey: '',
   defaultPromptId: 'general',
   autoDetectCategory: true,
+  autoRefreshChannelsDaily: true,
   streamResponse: true,
   theme: 'system',
   summarizationTimeoutMinutes: 5,
@@ -78,7 +79,6 @@ export const JOB_DB = {
   },
 } as const;
 
-export const NEW_VIDEO_CUTOFF_MS = Date.UTC(2026, 2, 14);
 export const CHANNEL_FETCH_MAX_RESULTS = 50;
 
 export const PLATFORM_PATTERNS: Record<string, RegExp[]> = {

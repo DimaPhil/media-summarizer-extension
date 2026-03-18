@@ -141,16 +141,3 @@ export class GeminiClient {
     }
   }
 }
-
-let clientInstance: GeminiClient | null = null;
-
-export function getGeminiClient(apiKey: string): GeminiClient {
-  if (!clientInstance || !apiKey) {
-    clientInstance = new GeminiClient(apiKey);
-  }
-  return clientInstance;
-}
-
-export function resetGeminiClient(): void {
-  clientInstance = null;
-}
