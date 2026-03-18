@@ -41,6 +41,7 @@ export interface Channel {
   uploadsPlaylistId: string;
   addedAt: number;
   lastFetchedAt?: number;
+  subscribed?: boolean;
 }
 
 export interface ChannelVideo {
@@ -183,6 +184,7 @@ export type MessageType =
   | 'LIST_CHANNELS'
   | 'LIST_CHANNELS_RESPONSE'
   | 'FETCH_CHANNEL_VIDEOS'
+  | 'REFRESH_ALL_CHANNELS'
   | 'CHANNEL_VIDEOS_RESPONSE'
   | 'LIST_CHANNEL_VIDEOS'
   | 'IGNORE_VIDEO'

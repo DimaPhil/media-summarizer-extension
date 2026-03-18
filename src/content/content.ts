@@ -100,5 +100,5 @@ chrome.runtime.onMessage.addListener((message: Message, _sender, sendResponse) =
 
 const videoInfo = getVideoInfo();
 if (videoInfo) {
-  console.log('[Media Summarizer] Video detected:', videoInfo.title);
+  console.debug('[Media Summarizer] Video detected:', videoInfo.title);
 }

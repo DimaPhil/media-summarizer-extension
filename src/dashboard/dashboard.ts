@@ -66,6 +66,7 @@ const elements = {
   tabJobs: document.getElementById('tab-jobs') as HTMLElement,
   tabChannels: document.getElementById('tab-channels') as HTMLElement,
   // Channels
+  refreshAllChannelsBtn: document.getElementById('refresh-all-channels-btn') as HTMLButtonElement,
   addChannelBtn: document.getElementById('add-channel-btn') as HTMLButtonElement,
   channelsListView: document.getElementById('channels-list-view') as HTMLElement,
   channelsList: document.getElementById('channels-list') as HTMLElement,
@@ -574,8 +575,9 @@ async function openChannelDetail(channelId: string): Promise<void> {
     // Toggle buttons based on subscription state
     // Prompt select is always visible so users see which prompt transcriptions use
     const subscribed = channel.subscribed;
+    const canRefresh = Boolean(channel.uploadsPlaylistId);
     elements.batchTranscribeBtn.classList.toggle('hidden', !subscribed);
-    elements.refreshVideosBtn.classList.toggle('hidden', !subscribed);
+    elements.refreshVideosBtn.classList.toggle('hidden', !canRefresh);
     elements.removeChannelBtn.classList.toggle('hidden', !subscribed);
     elements.subscribeChannelBtn.classList.toggle('hidden', subscribed);
   }
@@ -932,6 +934,35 @@ async function refreshChannelVideos(): Promise<void> {
   }
 }
 
+async function refreshAllChannels(): Promise<void> {
+  elements.refreshAllChannelsBtn.disabled = true;
+  elements.refreshAllChannelsBtn.textContent = 'Refreshing...';
+
+  try {
+    const result = await sendMessage<{ refreshedCount: number; failedCount: number }>(
+      'REFRESH_ALL_CHANNELS'
+    );
+    await loadChannels();
+
+    if (result.refreshedCount === 0 && result.failedCount === 0) {
+      showToast('No channels to refresh');
+      return;
+    }
+
+    if (result.failedCount > 0) {
+      showToast(`Refreshed ${result.refreshedCount} channel(s), ${result.failedCount} failed`);
+      return;
+    }
+
+    showToast(`Refreshed ${result.refreshedCount} channel(s)`);
+  } catch (error) {
+    showToast('Refresh all failed: ' + String(error));
+  } finally {
+    elements.refreshAllChannelsBtn.disabled = false;
+    elements.refreshAllChannelsBtn.textContent = 'Refresh All';
+  }
+}
+
 async function subscribeChannel(): Promise<void> {
   if (!selectedChannelId) return;
 
@@ -1064,6 +1095,9 @@ function bindEvents(): void {
   elements.viewPromptBtn.addEventListener('click', togglePromptView);
 
   // Channels tab
+  elements.refreshAllChannelsBtn.addEventListener('click', () => {
+    void refreshAllChannels();
+  });
   elements.addChannelBtn.addEventListener('click', openAddChannelModal);
   elements.channelBackBtn.addEventListener('click', closeChannelDetail);
   elements.batchTranscribeBtn.addEventListener('click', () => {

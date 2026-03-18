@@ -53,6 +53,66 @@ function notifyJobUpdated(jobId: string): void {
     .catch(() => {});
 }
 
+function isSubscribedChannel(channel: Channel | null | undefined): boolean {
+  return channel?.subscribed !== false;
+}
+
+async function syncChannelCatalog(
+  channelId: string,
+  settings: ExtensionSettings,
+  subscribedOverride?: boolean
+): Promise<Channel> {
+  if (!settings.youtubeApiKey) {
+    throw new Error('YouTube API key not configured');
+  }
+
+  const existing = await jobStore.getChannel(channelId);
+  const channelDetails = await fetchChannelDetails(channelId, settings.youtubeApiKey);
+  if (!channelDetails) {
+    throw new Error('Could not fetch channel details');
+  }
+
+  const playlistVideos = await fetchChannelVideos(
+    channelDetails.uploadsPlaylistId,
+    settings.youtubeApiKey
+  );
+
+  const videoIds = playlistVideos.map((video) => video.videoId);
+  const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
+  const now = Date.now();
+
+  const channel: Channel = {
+    channelId: channelDetails.channelId,
+    title: channelDetails.title,
+    thumbnailUrl: channelDetails.thumbnailUrl,
+    uploadsPlaylistId: channelDetails.uploadsPlaylistId,
+    addedAt:
+      subscribedOverride === true && existing?.subscribed === false
+        ? now
+        : (existing?.addedAt ?? now),
+    lastFetchedAt: now,
+    subscribed: subscribedOverride ?? existing?.subscribed ?? true,
+  };
+
+  const channelVideos: ChannelVideo[] = playlistVideos.map((video) => ({
+    videoId: video.videoId,
+    channelId: channel.channelId,
+    title: video.title,
+    thumbnailUrl: video.thumbnailUrl,
+    publishedAt: new Date(video.publishedAt).getTime(),
+    duration: durations[video.videoId],
+    ignored: false,
+    discoveredAt: now,
+  }));
+
+  await jobStore.addChannel(channel);
+  await jobStore.upsertChannelVideos(channelVideos);
+  await jobStore.backfillChannelIdOnJobs(channel.channelId, channel.title, videoIds);
+  notifyChannelUpdated(channel.channelId);
+
+  return channel;
+}
+
 function isDurationOrContextError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   const lowered = message.toLowerCase();
@@ -853,53 +913,14 @@ chrome.runtime.onMessage.addListener(
           // Check if already added
           const existing = await jobStore.getChannel(channelId);
           if (existing) {
-            return { type: 'CHANNEL_UPDATED', payload: existing };
+            if (isSubscribedChannel(existing)) {
+              return { type: 'CHANNEL_UPDATED', payload: existing };
+            }
+
+            const upgradedChannel = await syncChannelCatalog(channelId, settings, true);
+            return { type: 'CHANNEL_UPDATED', payload: upgradedChannel };
           }
-
-          // Fetch channel details from API
-          const channelDetails = await fetchChannelDetails(channelId, settings.youtubeApiKey);
-          if (!channelDetails) {
-            return { error: 'Could not fetch channel details' };
-          }
-
-          const channel: Channel = {
-            channelId: channelDetails.channelId,
-            title: channelDetails.title,
-            thumbnailUrl: channelDetails.thumbnailUrl,
-            uploadsPlaylistId: channelDetails.uploadsPlaylistId,
-            addedAt: Date.now(),
-          };
-
-          await jobStore.addChannel(channel);
-
-          // Fetch initial videos
-          const playlistVideos = await fetchChannelVideos(
-            channel.uploadsPlaylistId,
-            settings.youtubeApiKey
-          );
-
-          const videoIds = playlistVideos.map((v) => v.videoId);
-          const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
-
-          const now = Date.now();
-          const channelVideos: ChannelVideo[] = playlistVideos.map((v) => ({
-            videoId: v.videoId,
-            channelId: channel.channelId,
-            title: v.title,
-            thumbnailUrl: v.thumbnailUrl,
-            publishedAt: new Date(v.publishedAt).getTime(),
-            duration: durations[v.videoId],
-            ignored: false,
-            discoveredAt: now,
-          }));
-
-          await jobStore.upsertChannelVideos(channelVideos);
-          await jobStore.updateChannel(channel.channelId, { lastFetchedAt: now });
-
-          // Backfill channelId on existing jobs
-          await jobStore.backfillChannelIdOnJobs(channel.channelId, channel.title, videoIds);
-
-          notifyChannelUpdated(channel.channelId);
+          const channel = await syncChannelCatalog(channelId, settings, true);
           return { type: 'CHANNEL_UPDATED', payload: channel };
         }
 
@@ -922,7 +943,7 @@ chrome.runtime.onMessage.addListener(
               ).length;
               return {
                 ...ch,
-                subscribed: true,
+                subscribed: isSubscribedChannel(ch),
                 newCount,
                 totalCount: videos.length,
               };
@@ -967,47 +988,62 @@ chrome.runtime.onMessage.addListener(
           if (!settings.youtubeApiKey) {
             return { error: 'YouTube API key not configured' };
           }
-
-          const playlistVideos = await fetchChannelVideos(
-            channel.uploadsPlaylistId,
-            settings.youtubeApiKey
-          );
-
-          const videoIds = playlistVideos.map((v) => v.videoId);
-          const durations = await fetchVideoDurations(videoIds, settings.youtubeApiKey);
-
-          const now = Date.now();
-          const channelVideos: ChannelVideo[] = playlistVideos.map((v) => ({
-            videoId: v.videoId,
-            channelId: channel.channelId,
-            title: v.title,
-            thumbnailUrl: v.thumbnailUrl,
-            publishedAt: new Date(v.publishedAt).getTime(),
-            duration: durations[v.videoId],
-            ignored: false,
-            discoveredAt: now,
-          }));
-
-          await jobStore.upsertChannelVideos(channelVideos);
-          await jobStore.updateChannel(channelId, { lastFetchedAt: now });
-          notifyChannelUpdated(channelId);
+          await syncChannelCatalog(channelId, settings, isSubscribedChannel(channel));
 
           return { type: 'CHANNEL_VIDEOS_RESPONSE', payload: { success: true } };
+        }
+
+        case 'REFRESH_ALL_CHANNELS': {
+          const settings = await storage.getSettings();
+          if (!settings.youtubeApiKey) {
+            return { error: 'YouTube API key not configured' };
+          }
+
+          const storedChannels = await jobStore.listChannels();
+          const discoveredChannels = await jobStore.getDiscoveredChannels();
+          const refreshTargets = new Map<string, boolean>();
+
+          for (const channel of storedChannels) {
+            refreshTargets.set(channel.channelId, isSubscribedChannel(channel));
+          }
+
+          for (const [channelId] of discoveredChannels) {
+            if (!refreshTargets.has(channelId)) {
+              refreshTargets.set(channelId, false);
+            }
+          }
+
+          let refreshedCount = 0;
+          let failedCount = 0;
+
+          for (const [channelId, subscribed] of refreshTargets) {
+            try {
+              await syncChannelCatalog(channelId, settings, subscribed);
+              refreshedCount += 1;
+            } catch (error) {
+              failedCount += 1;
+              console.warn('Failed to refresh channel:', channelId, error);
+            }
+          }
+
+          return {
+            type: 'CHANNEL_UPDATED',
+            payload: { refreshedCount, failedCount },
+          };
         }
 
         case 'LIST_CHANNEL_VIDEOS': {
           const { channelId } = message.payload as { channelId: string };
           const channel = await jobStore.getChannel(channelId);
+          const storedVideos = await jobStore.listChannelVideos(channelId);
 
-          if (channel) {
-            // Subscribed channel — use channelVideos store
-            const videos = await jobStore.listChannelVideos(channelId);
-            const videoIds = videos.map((v) => v.videoId);
+          if (channel || storedVideos.length > 0) {
+            const videoIds = storedVideos.map((v) => v.videoId);
             const succeededIds = await jobStore.getSucceededVideoIds(videoIds);
             const runningIds = await jobStore.getRunningVideoIds(videoIds);
             const failedIds = await jobStore.getFailedVideoIds(videoIds);
 
-            const annotated = videos.map((v) => ({
+            const annotated = storedVideos.map((v) => ({
               ...v,
               hasTranscription: succeededIds.has(v.videoId),
               isRunning: runningIds.has(v.videoId),

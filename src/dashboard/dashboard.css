@@ -424,6 +424,8 @@ body {
 .channels-toolbar {
   display: flex;
   justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
   margin-bottom: 12px;
 }
 
